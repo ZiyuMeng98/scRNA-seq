@@ -1,0 +1,8 @@
+mkdir ~/working/scrna-seq/01.qc_and_filter
+cd ~/working/scrna-seq/01.qc_and_filter
+for i in $(ls -d /home/mengziyu/working/scrna-seq/00.incipient_data/scrna/SRR*); do
+    srr_dir="$i"
+    dir=$(basename "$i")
+    echo "fasterq-dump $srr_dir/$dir.sra --split-files --threads 2"
+done > command.sra_to_fastq.list
+ParaFly -c command.sra_to_fastq.list -CPU 8
