@@ -17,3 +17,7 @@ mv -r GSM* raw_GSM/
 mkdir raw_GSM
 cd raw_GSM
 gunzip *
+cd ../
+mkdir ref_genomic
+cd ref_genomic
+datasets download genome accession GCF_000001405.40 --include gff3,rna,cds,protein,genome,seq-report
