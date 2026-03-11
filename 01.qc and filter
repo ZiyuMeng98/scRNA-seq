@@ -33,7 +33,30 @@ for NAME in *_1.fastq.gz; do
     mv "${sample}_2.fastq.gz" "$sample/"  # 移动R2文件
 done
 
+# 看文献，12-15是ctrl组，08-11是实验组
+mkdir ctrl
+mv SRR21566212 ctrl/
+mv SRR21566213 ctrl/
+mv SRR21566214 ctrl/
+mv SRR21566215 ctrl/
+mkdir dm
+mv SRR21566208/ dm/
+mv SRR21566209/ dm/
+mv SRR21566210/ dm/
+mv SRR21566211/ dm/
+
+cd ctrl/
 for NAME in SRR*; do
-    echo "cellranger count --id=$NAME --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/human_GRCh38 --fastqs=$NAME --sample=$NAME --localcores=16 --localmem=64 --create-bam=true"
-done > command.cellranger_count.list
-ParaFly -c command.cellranger_count.list -CPU 8
+    cat ${NAME}/${NAME}_*_*_R1_*.fastq.gz >> ctrl_S1_L001_R1_001.fastq.gz
+    cat ${NAME}/${NAME}_*_*_R2_*.fastq.gz >> ctrl_S1_L001_R2_001.fastq.gz
+done
+cd ../dm/
+for NAME in SRR*; do
+    cat ${NAME}/${NAME}_*_*_R1_*.fastq.gz >> dm_S1_L001_R1_001.fastq.gz
+    cat ${NAME}/${NAME}_*_*_R2_*.fastq.gz >> dm_S1_L001_R2_001.fastq.gz
+done
+
+cd ../
+echo "cellranger count --id=ctrl_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=ctrl --sample=ctrl --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
+echo "cellranger count --id=dm_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=dm --sample=dm --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
+sh command.cellranger_count.sh
