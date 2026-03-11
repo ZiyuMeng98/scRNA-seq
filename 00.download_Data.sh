@@ -21,3 +21,10 @@ cd ../
 mkdir ref_genomic
 cd ref_genomic
 datasets download genome accession GCF_000001405.40 --include gff3,rna,cds,protein,genome,seq-report
+# 10×genomics需要使用自己的参考基因组
+wget https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-mm10-2020-A.tar.gz   # 小鼠
+tar -xzvf refdata-gex-mm10-2020-A.tar.gz
+mv refdata-gex-mm10-2020-A.tar.gz refdata-gex-mm10-2020-A_10×genomics_mouse
+wget https://cf.10xgenomics.com/supp/cell-exp/refdata-gex-GRCh38-2024-A.tar.gz
+tar -xzvf refdata-gex-GRCh38-2024-A.tar.gz
+mv refdata-gex-GRCh38-2024-A refdata-gex-GRCh38-2024-A_10×genomics_mouse
