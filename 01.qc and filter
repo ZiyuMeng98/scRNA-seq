@@ -1,8 +1,39 @@
 mkdir ~/working/scrna-seq/01.qc_and_filter
 cd ~/working/scrna-seq/01.qc_and_filter
+
+# sra文件转换为fastq文件 
 for i in $(ls -d /home/mengziyu/working/scrna-seq/00.incipient_data/scrna/SRR*); do
     srr_dir="$i"
     dir=$(basename "$i")
     echo "fasterq-dump $srr_dir/$dir.sra --split-files --threads 2"
 done > command.sra_to_fastq.list
 ParaFly -c command.sra_to_fastq.list -CPU 8
+
+# fastq文件转换文fastq.gz
+for i in *.fastq;do
+    echo "gzip $i"
+done > command.gzip.list
+ParaFly -c command.gzip.list -CPU 16
+
+# fastqc
+for r1 in *_1.fastq.gz; do
+    sample="${r1%_1.fastq.gz}"       
+    echo "fastqc ${sample}_1.fastq.gz ${sample}_2.fastq.gz"
+done > command.fastqc.list
+ParaFly -c command.fastqc.list -CPU 8
+mkdir fastqc
+mv *_1_* fastqc/
+mv *_2_* fastqc/
+
+# 将对应SRR双端测序文件输入到一个SRR文件夹中，为下一步cellranger做准备
+for NAME in *_1.fastq.gz; do
+    sample="${NAME%_1.fastq.gz}"        # 提取样本名，如 SRR21566208
+    mkdir -p "$sample"               # 创建文件夹
+    mv "${sample}_1.fastq.gz" "$sample/"  # 移动R1文件
+    mv "${sample}_2.fastq.gz" "$sample/"  # 移动R2文件
+done
+
+for NAME in SRR*; do
+    echo "cellranger count --id=$NAME --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/human_GRCh38 --fastqs=$NAME --sample=$NAME --localcores=16 --localmem=64 --create-bam=true"
+done > command.cellranger_count.list
+ParaFly -c command.cellranger_count.list -CPU 8
