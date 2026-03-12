@@ -56,7 +56,20 @@ for NAME in SRR*; do
     cat ${NAME}/${NAME}_*_*_R2_*.fastq.gz >> dm_S1_L001_R2_001.fastq.gz
 done
 
+# 合并所有样品进行
 cd ../
 echo "cellranger count --id=ctrl_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=ctrl --sample=ctrl --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
 echo "cellranger count --id=dm_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=dm --sample=dm --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
+sh command.cellranger_count.sh
+# 单独对ctrl组四个样品进行
+cd ctrl/
+for NAME in $(ls -d SRR*); do 
+echo "cellranger count --id=${NAME}_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=${NAME} --sample=${NAME} --localcores=16 --localmem=64 --create-bam=true"; 
+done > command.cellranger_count.sh
+sh command.cellranger_count.sh
+# 单独对dm组四个样品进行
+cd ../dm/
+for NAME in $(ls -d SRR*); do 
+echo "cellranger count --id=${NAME}_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=${NAME} --sample=${NAME} --localcores=16 --localmem=64 --create-bam=true"; 
+done > command.cellranger_count.sh
 sh command.cellranger_count.sh
