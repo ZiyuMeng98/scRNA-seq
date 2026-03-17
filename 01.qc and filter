@@ -73,3 +73,758 @@ for NAME in $(ls -d SRR*); do
 echo "cellranger count --id=${NAME}_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=${NAME} --sample=${NAME} --localcores=16 --localmem=64 --create-bam=true"; 
 done > command.cellranger_count.sh
 sh command.cellranger_count.sh
+
+##############################################################################
+# 以下是python脚本
+import matplotlib
+matplotlib.use('Agg')  # 必须在导入pyplot之前设置
+import matplotlib.pyplot as plt
+import scanpy as sc
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+import os
+
+# ======== 第三部分：分别读取和处理数据 ========
+print("="*60)
+print("开始分别处理Ctrl和DM组")
+print("="*60)
+
+# 定义质控函数
+def process_sample(adata, sample_name, condition_name, qc_params):
+    """对单个样本进行质控处理"""
+    print(f"\n处理样本: {sample_name} ({condition_name})")
+    
+    # 1. 计算QC指标
+    adata.var['mt'] = adata.var_names.str.startswith('mt-')
+    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
+    
+    # 2. 记录原始统计
+    n_cells_before = adata.n_obs
+    n_genes_before = adata.n_vars
+    
+    # 3. 质控过滤
+    qc_pass = ((adata.obs['n_genes_by_counts'] > qc_params['nFeature_min']) & 
+               (adata.obs['n_genes_by_counts'] < qc_params['nFeature_max']) & 
+               (adata.obs['pct_counts_mt'] < qc_params['mt_percent_max']))
+    
+    adata_qc = adata[qc_pass, :].copy()
+    n_cells_after = adata_qc.n_obs
+    
+    # 4. 打印统计
+    print(f"  原始细胞数: {n_cells_before}")
+    print(f"  质控后细胞数: {n_cells_after}")
+    print(f"  过滤细胞数: {n_cells_before - n_cells_after}")
+    print(f"  保留比例: {n_cells_after/n_cells_before:.2%}")
+    
+    # 5. 添加样本标签
+    adata_qc.obs['sample'] = sample_name
+    adata_qc.obs['condition'] = condition_name
+    
+    return adata, adata_qc
+
+# ======== 分别处理Ctrl和DM ========
+# 读取数据
+print("\n读取数据...")
+ctrl_adata_raw = sc.read_10x_mtx("ctrl_out/outs/filtered_feature_bc_matrix/", var_names='gene_symbols', cache=True)
+dm_adata_raw = sc.read_10x_mtx("dm_out/outs/filtered_feature_bc_matrix/", var_names='gene_symbols', cache=True)
+
+# 设置质控参数
+qc_params = {'nFeature_min': 200, 'nFeature_max': 6000, 'mt_percent_max': 20}
+
+# 分别处理Ctrl组
+print("\n" + "="*60)
+print("Ctrl组质控分析")
+print("="*60)
+ctrl_adata, ctrl_adata_qc = process_sample(ctrl_adata_raw, 'Ctrl', 'Control', qc_params)
+
+# 分别处理DM组
+print("\n" + "="*60)
+print("DM组质控分析")
+print("="*60)
+dm_adata, dm_adata_qc = process_sample(dm_adata_raw, 'DM', 'Diabetes', qc_params)
+
+# ======== 第四部分：分别可视化 ========
+print("\n" + "="*60)
+print("生成各组质控可视化图形")
+print("="*60)
+
+def create_qc_plots(adata, adata_qc, sample_name, save_prefix):
+    """为单个样本创建QC图"""
+    # 创建QC对比图
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    
+    # 质控前
+    sc.pl.violin(adata, ['n_genes_by_counts'], ax=axes[0, 0], show=False)
+    axes[0, 0].set_title(f'{sample_name} - Genes before QC')
+    
+    sc.pl.violin(adata, ['total_counts'], ax=axes[0, 1], show=False)
+    axes[0, 1].set_title(f'{sample_name} - UMIs before QC')
+    
+    sc.pl.violin(adata, ['pct_counts_mt'], ax=axes[0, 2], show=False)
+    axes[0, 2].set_title(f'{sample_name} - MT% before QC')
+    
+    # 质控后
+    sc.pl.violin(adata_qc, ['n_genes_by_counts'], ax=axes[1, 0], show=False)
+    axes[1, 0].set_title(f'{sample_name} - Genes after QC')
+    
+    sc.pl.violin(adata_qc, ['total_counts'], ax=axes[1, 1], show=False)
+    axes[1, 1].set_title(f'{sample_name} - UMIs after QC')
+    
+    sc.pl.violin(adata_qc, ['pct_counts_mt'], ax=axes[1, 2], show=False)
+    axes[1, 2].set_title(f'{sample_name} - MT% after QC')
+    
+    plt.suptitle(f'{sample_name}组质控前后对比', fontsize=16, y=1.02)
+    plt.tight_layout()
+    plt.savefig(f'{save_prefix}_qc_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✅ {sample_name}组QC对比图: {save_prefix}_qc_comparison.png")
+    
+    # 散点图
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    sc.pl.scatter(adata, x='total_counts', y='pct_counts_mt', ax=axes[0], show=False)
+    axes[0].set_title(f'{sample_name} - UMIs vs MT% (Before QC)')
+    
+    sc.pl.scatter(adata_qc, x='total_counts', y='pct_counts_mt', ax=axes[1], show=False)
+    axes[1].set_title(f'{sample_name} - UMIs vs MT% (After QC)')
+    
+    plt.suptitle(f'{sample_name}组UMIs vs MT%分布', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig(f'{save_prefix}_qc_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✅ {sample_name}组散点图: {save_prefix}_qc_scatter.png")
+
+# 为Ctrl组创建图形
+create_qc_plots(ctrl_adata, ctrl_adata_qc, 'Ctrl', 'ctrl')
+
+# 为DM组创建图形
+create_qc_plots(dm_adata, dm_adata_qc, 'DM', 'dm')
+
+# ======== 第五部分：合并数据 ========
+print("\n" + "="*60)
+print("合并质控后的数据")
+print("="*60)
+
+# 合并质控后的数据
+adata_qc = ctrl_adata_qc.concatenate(
+    dm_adata_qc, 
+    batch_key='sample',
+    batch_categories=['Ctrl', 'DM']
+)
+
+print(f"合并后总细胞数: {adata_qc.n_obs}, 总基因数: {adata_qc.n_vars}")
+
+# 查看样本分布
+print("\n各样本细胞数:")
+for sample in ['Ctrl', 'DM']:
+    n_cells = (adata_qc.obs['sample'] == sample).sum()
+    print(f"  {sample}: {n_cells} 个细胞")
+
+# ======== 第六部分：创建组合对比图 ========
+print("\n生成组合对比图...")
+
+# 1. 各组细胞数对比
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 质控前细胞数
+before_counts = [ctrl_adata.n_obs, dm_adata.n_obs]
+axes[0].bar(['Ctrl', 'DM'], before_counts, color=['skyblue', 'lightcoral'])
+axes[0].set_title('质控前细胞数')
+axes[0].set_ylabel('细胞数')
+for i, v in enumerate(before_counts):
+    axes[0].text(i, v, str(v), ha='center', va='bottom')
+
+# 质控后细胞数
+after_counts = [ctrl_adata_qc.n_obs, dm_adata_qc.n_obs]
+axes[1].bar(['Ctrl', 'DM'], after_counts, color=['deepskyblue', 'tomato'])
+axes[1].set_title('质控后细胞数')
+axes[1].set_ylabel('细胞数')
+for i, v in enumerate(after_counts):
+    axes[1].text(i, v, str(v), ha='center', va='bottom')
+
+plt.suptitle('Ctrl vs DM 质控前后细胞数对比', fontsize=14, y=1.05)
+plt.tight_layout()
+plt.savefig('sample_cell_counts_comparison.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 样本细胞数对比图: sample_cell_counts_comparison.png")
+
+# 2. 各组QC指标对比小提琴图
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+# 创建临时合并数据用于可视化
+adata_combined = ctrl_adata.concatenate(dm_adata, batch_key='sample', batch_categories=['Ctrl', 'DM'])
+adata_qc_combined = ctrl_adata_qc.concatenate(dm_adata_qc, batch_key='sample', batch_categories=['Ctrl', 'DM'])
+
+# 质控前的分组图
+sc.pl.violin(adata_combined, 'n_genes_by_counts', groupby='sample', ax=axes[0], show=False)
+axes[0].set_title('Genes per cell (Before QC)')
+
+sc.pl.violin(adata_combined, 'total_counts', groupby='sample', ax=axes[1], show=False)
+axes[1].set_title('UMIs per cell (Before QC)')
+
+sc.pl.violin(adata_combined, 'pct_counts_mt', groupby='sample', ax=axes[2], show=False)
+axes[2].set_title('MT% (Before QC)')
+
+plt.suptitle('各组QC指标分布（质控前）', fontsize=14, y=1.05)
+plt.tight_layout()
+plt.savefig('qc_by_sample_before.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 质控前分组图: qc_by_sample_before.png")
+
+# ======== 第七部分：保存数据和报告 ========
+print("\n" + "="*60)
+print("保存结果")
+print("="*60)
+
+# 保存合并后的质控数据
+adata_qc.write('adata_qc_filtered.h5ad')
+print("✅ 合并质控数据: adata_qc_filtered.h5ad")
+
+# 分别保存各组数据
+ctrl_adata_qc.write('ctrl_adata_qc.h5ad')
+dm_adata_qc.write('dm_adata_qc.h5ad')
+print("✅ Ctrl组质控数据: ctrl_adata_qc.h5ad")
+print("✅ DM组质控数据: dm_adata_qc.h5ad")
+
+# 生成质控报告
+with open('qc_summary_report.txt', 'w') as f:
+    f.write("="*60 + "\n")
+    f.write("单细胞RNA-seq质控分析报告\n")
+    f.write("="*60 + "\n\n")
+    
+    f.write("1. Ctrl组质控结果:\n")
+    f.write(f"   原始细胞数: {ctrl_adata.n_obs}\n")
+    f.write(f"   质控后细胞数: {ctrl_adata_qc.n_obs}\n")
+    f.write(f"   过滤细胞数: {ctrl_adata.n_obs - ctrl_adata_qc.n_obs}\n")
+    f.write(f"   保留比例: {ctrl_adata_qc.n_obs/ctrl_adata.n_obs:.2%}\n\n")
+    
+    f.write("2. DM组质控结果:\n")
+    f.write(f"   原始细胞数: {dm_adata.n_obs}\n")
+    f.write(f"   质控后细胞数: {dm_adata_qc.n_obs}\n")
+    f.write(f"   过滤细胞数: {dm_adata.n_obs - dm_adata_qc.n_obs}\n")
+    f.write(f"   保留比例: {dm_adata_qc.n_obs/dm_adata.n_obs:.2%}\n\n")
+    
+    f.write("3. 总体统计:\n")
+    f.write(f"   总细胞数（合并后）: {adata_qc.n_obs}\n")
+    f.write(f"   Ctrl占比: {ctrl_adata_qc.n_obs/adata_qc.n_obs:.1%}\n")
+    f.write(f"   DM占比: {dm_adata_qc.n_obs/adata_qc.n_obs:.1%}\n\n")
+    
+    f.write("4. 质控参数:\n")
+    for key, value in qc_params.items():
+        f.write(f"   {key}: {value}\n")
+
+print("✅ 质控报告: qc_summary_report.txt")
+
+print("\n" + "="*60)
+print("质控分析完成！")
+print("="*60)
+print(f"Ctrl组: {ctrl_adata_qc.n_obs} 个细胞")
+print(f"DM组: {dm_adata_qc.n_obs} 个细胞")
+print(f"总计: {adata_qc.n_obs} 个细胞")
+
+# 双细胞过滤
+# 在Python中，我们使用Scrublet作为DoubletFinder的替代
+sc.external.pl.scrublet_score_distribution(adata_qc, scale_hist_sim='log', figsize=(8, 4))
+plt.savefig('scrublet_score_distribution.png', dpi=150, bbox_inches='tight')
+plt.close()
+
+# 在 UMAP 上查看双细胞分布
+print("标准化和降维...")
+
+# 1. 标准化
+sc.pp.normalize_total(adata_qc, target_sum=1e4)
+sc.pp.log1p(adata_qc)
+
+# 2. 高变基因
+sc.pp.highly_variable_genes(adata_qc, min_mean=0.0125, max_mean=3, min_disp=0.5)
+adata_qc = adata_qc[:, adata_qc.var.highly_variable]
+
+# 3. 缩放
+sc.pp.scale(adata_qc, max_value=10)
+
+# 4. PCA降维
+sc.tl.pca(adata_qc, svd_solver='arpack')
+
+# 5. 检查PCA结果
+sc.pl.pca_variance_ratio(adata_qc, log=True, save='_pca_variance.png')
+
+# ======== 邻居图和UMAP ========
+print("构建邻居图...")
+
+# 修复数据类型
+adata_qc.obs['predicted_doublet'] = adata_qc.obs['predicted_doublet'].astype('category')
+adata_qc.obs['sample'] = adata_qc.obs['sample'].astype('category')
+
+# 计算邻居图（使用PCA结果）
+sc.pp.neighbors(adata_qc, n_neighbors=10, n_pcs=40)
+
+# UMAP降维
+print("计算UMAP...")
+sc.tl.umap(adata_qc)
+
+# ======== 可视化 ========
+print("生成可视化图形...")
+
+# 1. 双细胞在UMAP上的分布
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 按双细胞状态着色
+sc.pl.umap(adata_qc, color=['predicted_doublet'], ax=axes[0], show=False, legend_loc='on data')
+axes[0].set_title('Doublet Detection')
+
+# 按样本着色
+sc.pl.umap(adata_qc, color=['sample'], ax=axes[1], show=False, legend_loc='on data')
+axes[1].set_title('Sample Grouping')
+
+plt.suptitle('UMAP', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.savefig('umap_doublet_sample.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ UMAP图: umap_doublet_sample.png")
+
+# 2. 双细胞分数分布
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 按样本分组的双细胞分数
+sc.pl.violin(adata_qc, 'doublet_score', groupby='sample', ax=axes[0], show=False)
+axes[0].set_title('Distribution of Doublet Scores Across Samples')
+
+# 双细胞分数的UMAP
+sc.pl.umap(adata_qc, color=['doublet_score'], ax=axes[1], show=False, cmap='viridis')
+axes[1].set_title('Doublet Scores on UMAP')
+
+plt.suptitle('Doublet Detection Analysis', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.savefig('doublet_analysis.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 双细胞分析图: doublet_analysis.png")
+
+# 3. 详细的散点图
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+# 双细胞分数与基因数
+sc.pl.scatter(adata_qc, x='n_genes_by_counts', y='doublet_score', 
+              color='predicted_doublet', ax=axes[0], show=False)
+axes[0].set_title('双细胞分数 vs 基因数')
+
+# 双细胞分数与UMI数
+sc.pl.scatter(adata_qc, x='total_counts', y='doublet_score', 
+              color='predicted_doublet', ax=axes[1], show=False)
+axes[1].set_title('双细胞分数 vs UMI数')
+
+# 双细胞分数与线粒体比例
+sc.pl.scatter(adata_qc, x='pct_counts_mt', y='doublet_score', 
+              color='predicted_doublet', ax=axes[2], show=False)
+axes[2].set_title('双细胞分数 vs 线粒体%')
+
+plt.suptitle('双细胞与QC指标关系', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.savefig('doublet_qc_correlation.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 双细胞-QC关系图: doublet_qc_correlation.png")
+
+# ======== 统计报告 ========
+print("\n" + "="*60)
+print("双细胞检测统计报告")
+print("="*60)
+
+# 总体统计
+total_cells = adata_qc.n_obs
+total_doublets = (adata_qc.obs['predicted_doublet'] == True).sum()
+doublet_rate = total_doublets / total_cells
+
+print(f"总细胞数: {total_cells}")
+print(f"双细胞数: {total_doublets}")
+print(f"双细胞比例: {doublet_rate:.2%}")
+
+# 按样本统计
+print("\n按样本统计:")
+for sample in ['Ctrl', 'DM']:
+    sample_mask = adata_qc.obs['sample'] == sample
+    n_cells = sample_mask.sum()
+    n_doublets = (adata_qc.obs.loc[sample_mask, 'predicted_doublet'] == True).sum()
+    sample_rate = n_doublets / n_cells if n_cells > 0 else 0
+    
+    print(f"  {sample}:")
+    print(f"    细胞数: {n_cells}")
+    print(f"    双细胞数: {n_doublets}")
+    print(f"    比例: {sample_rate:.2%}")
+    
+    # 双细胞分数的统计
+    scores = adata_qc.obs.loc[sample_mask, 'doublet_score']
+    mean_score = scores.mean()
+    median_score = scores.median()
+    print(f"    平均分数: {mean_score:.3f}")
+    print(f"    中位数: {median_score:.3f}")
+
+# 保存最终数据
+adata_qc.write('adata_qc_clean.h5ad')
+print("\n✅ 数据已保存: adata_qc_with_umap.h5ad")
+
+# 生成报告
+with open('doublet_detection_report.txt', 'w') as f:
+    f.write("="*60 + "\n")
+    f.write("双细胞检测报告\n")
+    f.write("="*60 + "\n\n")
+    
+    f.write(f"总细胞数: {total_cells}\n")
+    f.write(f"双细胞数: {total_doublets}\n")
+    f.write(f"双细胞比例: {doublet_rate:.2%}\n\n")
+    
+    f.write("按样本统计:\n")
+    for sample in ['Ctrl', 'DM']:
+        sample_mask = adata_qc.obs['sample'] == sample
+        n_cells = sample_mask.sum()
+        n_doublets = (adata_qc.obs.loc[sample_mask, 'predicted_doublet'] == True).sum()
+        sample_rate = n_doublets / n_cells if n_cells > 0 else 0
+        f.write(f"  {sample}: {n_cells}细胞, {n_doublets}双细胞 ({sample_rate:.2%})\n")
+
+print("✅ 报告已保存: doublet_detection_report.txt")
+print("\n双细胞检测和可视化完成！")
+##############################################################################
+
+##############################################################################
+# 归一化和高变基因选择
+# ======== 导入库 ========
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import scanpy as sc
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+import seaborn as sns
+from scipy import sparse
+import os
+
+# ======== 步骤1：加载数据并检查NaN ========
+print("="*60)
+print("步骤1: 加载数据并检查数据质量")
+print("="*60)
+
+# 加载你的数据
+adata = sc.read('adata_qc_clean.h5ad')
+print(f"数据形状: {adata.shape}")
+print(f"总细胞数: {adata.n_obs}")
+print(f"总基因数: {adata.n_vars}")
+
+# 检查NaN值
+print("\n检查数据中的NaN值...")
+if sparse.issparse(adata.X):
+    # 稀疏矩阵检查
+    nnz = adata.X.nnz
+    total_elements = adata.n_obs * adata.n_vars
+    sparsity = 1 - (nnz / total_elements)
+    print(f"稀疏矩阵: 非零元素 = {nnz}, 稀疏性 = {sparsity:.2%}")
+    
+    # 检查是否有显式的NaN
+    if hasattr(adata.X, 'data'):
+        nan_count = np.isnan(adata.X.data).sum()
+        print(f"稀疏矩阵中的NaN值: {nan_count}")
+else:
+    # 稠密矩阵检查
+    nan_count = np.isnan(adata.X).sum()
+    print(f"稠密矩阵中的NaN值: {nan_count}")
+
+# 检查基因的平均表达
+print("\n计算基因平均表达...")
+if sparse.issparse(adata.X):
+    # 对稀疏矩阵高效计算
+    gene_means = np.array(adata.X.mean(axis=0)).flatten()
+else:
+    gene_means = adata.X.mean(axis=0)
+
+print(f"基因平均表达范围: [{gene_means.min():.3e}, {gene_means.max():.3e}]")
+print(f"平均表达为0的基因数: {(gene_means == 0).sum()}")
+
+# 检查是否有无限值
+if not sparse.issparse(adata.X):
+    inf_count = np.isinf(adata.X).sum()
+    print(f"无限值数量: {inf_count}")
+
+# ======== 步骤2：数据归一化 ========
+print("\n" + "="*60)
+print("步骤2: 数据归一化")
+print("="*60)
+
+# 检查当前数据
+print("检查当前数据...")
+if sparse.issparse(adata.X):
+    current_sum = adata.X.sum()
+    if hasattr(current_sum, 'toarray'):
+        current_sum = current_sum.toarray()[0,0]
+    print(f"当前总表达量: {current_sum:.1f}")
+else:
+    print(f"当前总表达量: {adata.X.sum():.1f}")
+
+# 2.1 总计数归一化
+print("\n2.1 总计数归一化到10,000")
+try:
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    print(f"归一化后平均总计数: {adata.X.sum(axis=1).mean():.1f}")
+except Exception as e:
+    print(f"归一化出错: {e}")
+    print("尝试手动归一化...")
+    # 手动归一化
+    from sklearn.preprocessing import normalize
+    if sparse.issparse(adata.X):
+        adata.X = normalize(adata.X, norm='l1', axis=1) * 1e4
+    else:
+        adata.X = normalize(adata.X, norm='l1', axis=1) * 1e4
+    print(f"手动归一化完成，平均总计数: {adata.X.sum(axis=1).mean():.1f}")
+
+# 2.2 对数转换
+print("\n2.2 对数转换 (log1p)")
+try:
+    sc.pp.log1p(adata)
+    print("✅ 对数转换完成")
+except Exception as e:
+    print(f"对数转换出错: {e}")
+    print("确保数据非负...")
+    # 确保数据非负
+    if sparse.issparse(adata.X):
+        adata.X.data = np.maximum(adata.X.data, 0)
+    else:
+        adata.X = np.maximum(adata.X, 0)
+    sc.pp.log1p(adata)
+    print("对数转换完成")
+
+# 再次检查NaN
+if not sparse.issparse(adata.X):
+    nan_after = np.isnan(adata.X).sum()
+    print(f"归一化后NaN值: {nan_after}")
+    if nan_after > 0:
+        print("⚠️ 仍有NaN值，替换为0")
+        adata.X = np.nan_to_num(adata.X, nan=0.0)
+
+# 保存归一化后的数据
+adata.write('adata_normalized.h5ad')
+print("✅ 保存归一化数据: adata_normalized.h5ad")
+
+# ======== 步骤3：高变基因选择（修复版） ========
+print("\n" + "="*60)
+print("步骤3: 高变基因选择（修复版）")
+print("="*60)
+
+# 3.1 手动计算高变基因
+print("手动计算基因统计...")
+
+# 计算每个基因的均值和方差
+if sparse.issparse(adata.X):
+    # 稀疏矩阵的高效计算
+    gene_means = np.array(adata.X.mean(axis=0)).flatten()
+    # 计算方差
+    gene_vars = np.array((adata.X.power(2)).mean(axis=0)).flatten() - gene_means**2
+else:
+    gene_means = adata.X.mean(axis=0)
+    gene_vars = adata.X.var(axis=0)
+
+# 避免除零错误
+epsilon = 1e-10
+gene_vars = np.maximum(gene_vars, epsilon)
+
+# 计算离散度
+gene_dispersions = gene_vars / (gene_means + epsilon)
+
+# 存储到adata.var
+adata.var['means'] = gene_means
+adata.var['variances'] = gene_vars
+adata.var['dispersions'] = gene_dispersions
+
+print(f"基因统计:")
+print(f"  平均表达范围: [{gene_means.min():.3e}, {gene_means.max():.3e}]")
+print(f"  方差范围: [{gene_vars.min():.3e}, {gene_vars.max():.3e}]")
+print(f"  离散度范围: [{gene_dispersions.min():.3e}, {gene_dispersions.max():.3e}]")
+
+# 3.2 手动选择高变基因
+print("\n手动选择高变基因...")
+
+# 过滤低表达基因
+min_mean_threshold = 0.01
+mean_filter = gene_means >= min_mean_threshold
+print(f"平均表达 >= {min_mean_threshold} 的基因数: {mean_filter.sum()}")
+
+if mean_filter.sum() < 100:
+    print("⚠️ 高表达基因太少，降低阈值...")
+    min_mean_threshold = 0.001
+    mean_filter = gene_means >= min_mean_threshold
+    print(f"新阈值下基因数: {mean_filter.sum()}")
+
+# 归一化离散度
+from scipy import stats
+valid_dispersions = gene_dispersions[mean_filter]
+if len(valid_dispersions) > 0:
+    # 归一化到均值为0，标准差为1
+    disp_norm = stats.zscore(np.log1p(valid_dispersions))
+    disp_norm = np.nan_to_num(disp_norm, nan=0.0)
+    
+    # 选择top基因
+    n_top_genes = min(2000, mean_filter.sum())
+    if n_top_genes > 0:
+        # 按归一化离散度排序
+        top_indices = np.argsort(disp_norm)[-n_top_genes:]
+        # 获取原始索引
+        all_indices = np.where(mean_filter)[0]
+        top_gene_indices = all_indices[top_indices]
+        
+        # 标记高变基因
+        adata.var['highly_variable'] = False
+        adata.var.iloc[top_gene_indices, adata.var.columns.get_loc('highly_variable')] = True
+        adata.var['dispersions_norm'] = 0.0
+        adata.var.iloc[all_indices, adata.var.columns.get_loc('dispersions_norm')] = disp_norm
+        
+        n_hv_genes = adata.var['highly_variable'].sum()
+        print(f"✅ 选择高变基因数: {n_hv_genes}")
+    else:
+        print("⚠️ 没有符合条件的基因，使用所有基因")
+        adata.var['highly_variable'] = True
+        n_hv_genes = adata.n_vars
+else:
+    print("⚠️ 没有有效的离散度值，使用所有基因")
+    adata.var['highly_variable'] = True
+    n_hv_genes = adata.n_vars
+
+print(f"高变基因比例: {n_hv_genes/adata.n_vars:.2%}")
+
+# 3.3 可视化
+print("\n生成高变基因可视化...")
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 均值-离散度图
+if 'dispersions_norm' in adata.var.columns:
+    # 所有基因
+    axes[0].scatter(adata.var['means'], adata.var['dispersions_norm'], 
+                   alpha=0.1, s=5, c='gray', label='all Genes')
+    
+    # 高变基因
+    hv_mask = adata.var['highly_variable']
+    axes[0].scatter(adata.var.loc[hv_mask, 'means'], 
+                   adata.var.loc[hv_mask, 'dispersions_norm'],
+                   alpha=0.7, s=10, c='red', label='HVGs')
+    
+    axes[0].set_xlabel('平均表达 (log)')
+    axes[0].set_ylabel('归一化离散度')
+    axes[0].set_title('高变基因选择')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+else:
+    axes[0].text(0.5, 0.5, '无离散度数据', ha='center', va='center')
+    axes[0].set_title('HVGs')
+
+# 基因分类统计
+categories = ['HVGs', 'Not HVGs']
+values = [n_hv_genes, adata.n_vars - n_hv_genes]
+colors = ['lightcoral', 'lightblue']
+
+bars = axes[1].bar(categories, values, color=colors)
+axes[1].set_ylabel('Number of genes')
+axes[1].set_title('Gene Classification Statistics')
+
+for bar, value in zip(bars, values):
+    height = bar.get_height()
+    axes[1].text(bar.get_x() + bar.get_width()/2., height + 5,
+                f'{value}', ha='center', va='bottom')
+
+plt.tight_layout()
+plt.savefig('highly_variable_genes_fixed.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 高变基因选择图: highly_variable_genes_fixed.png")
+
+# ======== 步骤4：提取高变基因子集 ========
+print("\n" + "="*60)
+print("步骤4: 提取高变基因子集")
+print("="*60)
+
+print("提取高变基因子集...")
+adata_hv = adata[:, adata.var['highly_variable']].copy()
+print(f"原始数据形状: {adata.shape}")
+print(f"高变基因子集形状: {adata_hv.shape}")
+
+# ======== 步骤5：数据缩放 ========
+print("\n" + "="*60)
+print("步骤5: 数据缩放")
+print("="*60)
+
+print("对高变基因进行缩放...")
+try:
+    sc.pp.scale(adata_hv, max_value=10)
+    print("✅ 缩放完成")
+except Exception as e:
+    print(f"缩放出错: {e}")
+    print("手动缩放...")
+    from sklearn.preprocessing import StandardScaler
+    if sparse.issparse(adata_hv.X):
+        dense_data = adata_hv.X.toarray()
+    else:
+        dense_data = adata_hv.X
+    
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(dense_data)
+    # 限制极端值
+    scaled_data = np.clip(scaled_data, -10, 10)
+    
+    if sparse.issparse(adata_hv.X):
+        adata_hv.X = sparse.csr_matrix(scaled_data)
+    else:
+        adata_hv.X = scaled_data
+    print("手动缩放完成")
+
+# 保存缩放后的高变基因子集
+adata_hv.write('adata_hv_scaled.h5ad')
+print("✅ 保存缩放后高变基因子集: adata_hv_scaled.h5ad")
+
+# ======== 步骤6：保存结果 ========
+print("\n" + "="*60)
+print("步骤6: 保存结果")
+print("="*60)
+
+# 保存高变基因列表
+hv_genes = adata.var_names[adata.var['highly_variable']].tolist()
+pd.DataFrame({'gene': hv_genes}).to_csv('highly_variable_genes_list.csv', index=False)
+print("✅ 高变基因列表: highly_variable_genes_list.csv")
+
+# 保存完整数据
+adata.write('adata_with_hv_markers.h5ad')
+print("✅ 完整数据: adata_with_hv_markers.h5ad")
+
+# 生成报告
+with open('normalization_report_fixed.txt', 'w') as f:
+    f.write("="*60 + "\n")
+    f.write("归一化和高变基因选择报告（修复版）\n")
+    f.write("="*60 + "\n\n")
+    
+    f.write(f"输入文件: adata_qc_clean.h5ad\n")
+    f.write(f"细胞数: {adata.n_obs}\n")
+    f.write(f"基因数: {adata.n_vars}\n\n")
+    
+    f.write("归一化方法: normalize_total + log1p\n")
+    f.write("目标总计数: 10,000\n\n")
+    
+    f.write("高变基因选择（手动）:\n")
+    f.write(f"  高变基因数: {n_hv_genes}\n")
+    f.write(f"  比例: {n_hv_genes/adata.n_vars:.2%}\n")
+    f.write(f"  最小平均表达阈值: {min_mean_threshold}\n")
+    f.write(f"  目标基因数: 2000\n")
+    f.write(f"  实际选择: {n_hv_genes}\n\n")
+    
+    f.write("数据缩放: StandardScaler (限制范围: -10 to 10)\n\n")
+    
+    f.write("输出文件:\n")
+    f.write("  1. adata_normalized.h5ad - 归一化数据\n")
+    f.write("  2. adata_hv_scaled.h5ad - 缩放后高变基因子集\n")
+    f.write("  3. adata_with_hv_markers.h5ad - 完整数据\n")
+    f.write("  4. highly_variable_genes_list.csv - 高变基因列表\n")
+    f.write("  5. highly_variable_genes_fixed.png - 可视化图\n")
+
+print("✅ 报告: normalization_report_fixed.txt")
+
+print("\n" + "="*60)
+print("✅ 归一化和高变基因选择完成！")
+print("="*60)
+print(f"\n下一步使用 adata_hv_scaled.h5ad 进行PCA降维")
+##############################################################################
+
+##############################################################################
+
