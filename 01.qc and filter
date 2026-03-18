@@ -75,7 +75,8 @@ done > command.cellranger_count.sh
 sh command.cellranger_count.sh
 
 ##############################################################################
-# 以下是python脚本
+# 质控和过滤
+# 以下在python3.8.4环境进行
 import matplotlib
 matplotlib.use('Agg')  # 必须在导入pyplot之前设置
 import matplotlib.pyplot as plt
@@ -486,7 +487,7 @@ print("\n双细胞检测和可视化完成！")
 
 ##############################################################################
 # 归一化和高变基因选择
-# ======== 导入库 ========
+# 以下在python3.8.4环境进行
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -827,4 +828,738 @@ print(f"\n下一步使用 adata_hv_scaled.h5ad 进行PCA降维")
 ##############################################################################
 
 ##############################################################################
+# PCA降维和聚类
+# 以下在python3.8.4环境进行
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import scanpy as sc
+import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+import seaborn as sns
+from scipy import sparse
+import os
+import sys
 
+# 检查是否安装了harmony
+try:
+    import harmonypy
+    HARMONY_AVAILABLE = True
+except ImportError:
+    print("未安装harmonypy，将使用scanpy内置方法")
+    HARMONY_AVAILABLE = False
+
+# ======== 步骤1：加载数据 ========
+print("="*60)
+print("步骤1: 加载缩放后的高变基因数据")
+print("="*60)
+
+# 加载数据
+adata = sc.read('adata_hv_scaled.h5ad')
+print(f"数据形状: {adata.shape}")
+print(f"细胞数: {adata.n_obs}")
+print(f"高变基因数: {adata.n_vars}")
+
+# 检查样本信息
+if 'sample' in adata.obs.columns:
+    samples = adata.obs['sample'].unique()
+    print(f"样本: {samples}")
+    print(f"样本分布:\n{adata.obs['sample'].value_counts()}")
+else:
+    print("⚠️ 未找到sample列，需要添加样本信息")
+
+# ======== 步骤2：PCA降维 ========
+print("\n" + "="*60)
+print("步骤2: PCA降维")
+print("="*60)
+
+# 运行PCA
+print("运行PCA...")
+sc.tl.pca(adata, svd_solver='arpack', n_comps=50)
+print(f"PCA完成，主成分数: {adata.obsm['X_pca'].shape[1]}")
+
+# 查看PCA方差解释
+print("\nPCA方差解释（前10个主成分）:")
+variance_ratio = adata.uns['pca']['variance_ratio']
+for i, ratio in enumerate(variance_ratio[:10], 1):
+    print(f"  PC{i}: {ratio:.3%}")
+
+# 累积方差解释
+cumulative_variance = np.cumsum(variance_ratio)
+pc_80 = np.argmax(cumulative_variance >= 0.8) + 1
+pc_90 = np.argmax(cumulative_variance >= 0.9) + 1
+print(f"\n达到80%方差解释需要: PC{pc_80}")
+print(f"达到90%方差解释需要: PC{pc_90}")
+
+# 绘制碎石图
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 碎石图
+axes[0].plot(range(1, len(variance_ratio) + 1), variance_ratio, marker='o', alpha=0.7)
+axes[0].axvline(x=pc_80, color='red', linestyle='--', alpha=0.5, label=f'PC{pc_80} (80%)')
+axes[0].axvline(x=pc_90, color='green', linestyle='--', alpha=0.5, label=f'PC{pc_90} (90%)')
+axes[0].set_xlabel('主成分')
+axes[0].set_ylabel('方差解释比例')
+axes[0].set_title('PCA碎石图')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# 累积方差
+axes[1].plot(range(1, len(cumulative_variance) + 1), cumulative_variance, marker='o', alpha=0.7, color='orange')
+axes[1].axhline(y=0.8, color='red', linestyle='--', alpha=0.5, label='80%方差')
+axes[1].axhline(y=0.9, color='green', linestyle='--', alpha=0.5, label='90%方差')
+axes[1].set_xlabel('主成分数')
+axes[1].set_ylabel('累积方差解释')
+axes[1].set_title('累积方差解释')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('pca_scree_plot.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ PCA碎石图: pca_scree_plot.png")
+
+# ======== 步骤3：批次效应评估 ========
+print("\n" + "="*60)
+print("步骤3: 批次效应评估")
+print("="*60)
+
+if 'sample' in adata.obs.columns and len(samples) > 1:
+    print(f"检测到 {len(samples)} 个样本，评估批次效应...")
+    
+    # 在PCA空间查看批次分离
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # PC1 vs PC2
+    sc.pl.pca(adata, color='sample', ax=axes[0], show=False, legend_loc='on data')
+    axes[0].set_title('PC1 vs PC2 (按样本着色)')
+    
+    # PC1 vs PC3
+    sc.pl.pca(adata, color='sample', components=['1,3'], ax=axes[1], show=False, legend_loc='on data')
+    axes[1].set_title('PC1 vs PC3 (按样本着色)')
+    
+    plt.suptitle('PCA空间中的批次效应', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig('batch_effect_pca.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("✅ 批次效应评估图: batch_effect_pca.png")
+    
+    # 计算批次混合指标
+    print("\n计算批次混合指标...")
+    from sklearn.neighbors import NearestNeighbors
+    
+    def calculate_batch_mixing(pca_coords, batch_labels, k=50):
+        """计算批次混合程度"""
+        nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='ball_tree').fit(pca_coords)
+        distances, indices = nbrs.kneighbors(pca_coords)
+        
+        batch_mixing_scores = []
+        for i in range(len(pca_coords)):
+            neighbor_indices = indices[i, 1:]  # 排除自身
+            neighbor_batches = batch_labels[neighbor_indices]
+            
+            # 邻居中不同批次的比例
+            unique_batches = np.unique(neighbor_batches)
+            mixing_score = len(unique_batches) / len(np.unique(batch_labels))
+            batch_mixing_scores.append(mixing_score)
+        
+        return np.array(batch_mixing_scores)
+    
+    # 使用前30个PC
+    pca_coords = adata.obsm['X_pca'][:, :30]
+    batch_labels = adata.obs['sample'].values
+    
+    batch_mixing_scores = calculate_batch_mixing(pca_coords, batch_labels, k=50)
+    adata.obs['batch_mixing_score'] = batch_mixing_scores
+    
+    print(f"平均批次混合分数: {batch_mixing_scores.mean():.3f}")
+    print(f"批次混合分数范围: [{batch_mixing_scores.min():.3f}, {batch_mixing_scores.max():.3f}]")
+    
+    # 可视化批次混合
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 批次混合分数分布
+    axes[0].hist(batch_mixing_scores, bins=30, alpha=0.7, color='skyblue')
+    axes[0].axvline(x=batch_mixing_scores.mean(), color='red', linestyle='--', 
+                   label=f'均值={batch_mixing_scores.mean():.3f}')
+    axes[0].set_xlabel('批次混合分数')
+    axes[0].set_ylabel('细胞数')
+    axes[0].set_title('批次混合分数分布')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # 各样本的批次混合
+    sample_mixing = []
+    for sample in samples:
+        sample_mask = adata.obs['sample'] == sample
+        sample_mean = batch_mixing_scores[sample_mask].mean()
+        sample_mixing.append(sample_mean)
+    
+    axes[1].bar(range(len(samples)), sample_mixing, 
+               color=sns.color_palette("Set2", len(samples)))
+    axes[1].set_xlabel('样本')
+    axes[1].set_ylabel('平均批次混合分数')
+    axes[1].set_title('各样本批次混合程度')
+    axes[1].set_xticks(range(len(samples)))
+    axes[1].set_xticklabels(samples)
+    
+    for i, v in enumerate(sample_mixing):
+        axes[1].text(i, v, f'{v:.3f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.savefig('batch_mixing_analysis.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("✅ 批次混合分析图: batch_mixing_analysis.png")
+    
+else:
+    print("只有一个样本，跳过批次效应评估")
+
+# ======== 步骤4：批次校正（可选） ========
+print("\n" + "="*60)
+print("步骤4: 批次校正（如果有多批次）")
+print("="*60)
+
+if 'sample' in adata.obs.columns and len(samples) > 1:
+    print(f"检测到 {len(samples)} 个样本，进行批次校正...")
+    
+    if batch_mixing_scores.mean() < 0.3:
+        print("⚠️ 批次混合分数低，建议进行批次校正")
+        
+        # 方法选择
+        if HARMONY_AVAILABLE:
+            print("使用Harmony进行批次校正...")
+            
+            # 准备数据
+            pca_coords = adata.obsm['X_pca'][:, :pc_80]  # 使用达到80%方差的PC
+            batch_info = adata.obs[['sample']]
+            
+            # 运行Harmony
+            ho = harmonypy.run_harmony(
+                pca_coords, 
+                batch_info, 
+                'sample',
+                max_iter_harmony=20,
+                verbose=False
+            )
+            
+            # 获取校正后的坐标
+            corrected_coords = ho.Z_corr.T
+            
+            # 添加到adata
+            adata.obsm['X_pca_harmony'] = np.zeros((adata.n_obs, 50))
+            adata.obsm['X_pca_harmony'][:, :corrected_coords.shape[1]] = corrected_coords
+            
+            print("✅ Harmony批次校正完成")
+            
+            # 可视化校正效果
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # 校正前
+            sc.pl.pca(adata, color='sample', ax=axes[0], show=False, legend_loc='on data')
+            axes[0].set_title('校正前')
+            
+            # 校正后（临时替换PCA坐标）
+            temp_pca = adata.obsm['X_pca'].copy()
+            adata.obsm['X_pca'] = adata.obsm['X_pca_harmony']
+            sc.pl.pca(adata, color='sample', ax=axes[1], show=False, legend_loc='on data')
+            axes[1].set_title('Harmony校正后')
+            adata.obsm['X_pca'] = temp_pca  # 恢复原始坐标
+            
+            plt.suptitle('Harmony批次校正效果', fontsize=14, y=1.02)
+            plt.tight_layout()
+            plt.savefig('harmony_correction.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            print("✅ Harmony校正效果图: harmony_correction.png")
+            
+            # 使用校正后的坐标进行后续分析
+            use_harmony = True
+        else:
+            print("Harmony不可用，使用scanpy的整合方法...")
+            use_harmony = False
+    else:
+        print("批次混合良好，跳过批次校正")
+        use_harmony = False
+else:
+    print("只有一个样本，跳过批次校正")
+    use_harmony = False
+
+# ======== 步骤5：构建邻居图和UMAP ========
+print("\n" + "="*60)
+print("步骤5: 构建邻居图和UMAP降维")
+print("="*60)
+
+# 选择使用的PCA坐标
+if use_harmony and 'X_pca_harmony' in adata.obsm:
+    print("使用Harmony校正后的PCA坐标...")
+    # 临时替换PCA坐标
+    original_pca = adata.obsm['X_pca'].copy()
+    adata.obsm['X_pca'] = adata.obsm['X_pca_harmony']
+else:
+    print("使用原始PCA坐标...")
+
+# 5.1 构建邻居图
+print("\n5.1 构建邻居图...")
+# 使用达到80%方差的PC数
+n_pcs = min(pc_80, 50)
+print(f"使用前 {n_pcs} 个PC构建邻居图")
+
+sc.pp.neighbors(
+    adata,
+    n_neighbors=15,      # 邻居数
+    n_pcs=n_pcs,         # 使用的PC数
+    metric='euclidean',  # 距离度量
+    random_state=42
+)
+print("✅ 邻居图构建完成")
+
+# 5.2 UMAP降维
+print("\n5.2 UMAP降维...")
+sc.tl.umap(adata, random_state=42)
+print("✅ UMAP计算完成")
+
+# 恢复原始PCA坐标（如果使用了Harmony）
+if use_harmony and 'original_pca' in locals():
+    adata.obsm['X_pca'] = original_pca
+
+# ======== 步骤6：聚类分析 ========
+print("\n" + "="*60)
+print("步骤6: 聚类分析")
+print("="*60)
+
+# 6.1 Leiden聚类
+print("6.1 Leiden聚类...")
+# 尝试不同的分辨率
+resolutions = [0.1, 0.2, 0.4, 0.8, 1.0, 0.05, 0.02, 0.01]  # 添加更小的分辨率
+best_resolution = 0.1
+best_n_clusters = 0
+all_results = []
+
+for res in resolutions:
+    print(f"  测试分辨率: {res}")
+    sc.tl.leiden(adata, resolution=res, random_state=42)
+    n_clusters = len(adata.obs['leiden'].unique())
+    print(f"    聚类数: {n_clusters}")
+    all_results.append((res, n_clusters))
+    
+    # 寻找最接近10-20个聚类的分辨率
+    if 10 <= n_clusters <= 20:
+        if best_n_clusters == 0 or abs(n_clusters - 15) < abs(best_n_clusters - 15):
+            best_resolution = res
+            best_n_clusters = n_clusters
+
+# 如果没有找到10-20的聚类，选择最接近的
+if best_n_clusters == 0:
+    print("未找到10-20个聚类，选择最接近的分辨率...")
+    # 找到聚类数最少的结果
+    all_results.sort(key=lambda x: x[1])  # 按聚类数排序
+    for res, n_clusters in all_results:
+        if n_clusters >= 5:  # 至少5个聚类
+            best_resolution = res
+            best_n_clusters = n_clusters
+            break
+
+print(f"\n选择分辨率: {best_resolution}, 得到 {best_n_clusters} 个聚类")
+sc.tl.leiden(adata, resolution=best_resolution, key_added='cluster', random_state=42)
+print(f"最终聚类数: {len(adata.obs['cluster'].unique())}")
+
+# 6.2 计算聚类标记基因
+print("\n6.2 计算聚类标记基因...")
+sc.tl.rank_genes_groups(
+    adata, 
+    'cluster', 
+    method='wilcoxon',
+    key_added='rank_genes_cluster'
+)
+print("✅ 标记基因计算完成")
+
+# ======== 步骤7：可视化 ========
+print("\n" + "="*60)
+print("步骤7: 可视化分析")
+print("="*60)
+
+print("生成可视化图形...")
+
+# 7.1 UMAP可视化
+fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+
+# 按聚类着色
+sc.pl.umap(adata, color=['cluster'], ax=axes[0, 0], show=False, legend_loc='on data')
+axes[0, 0].set_title('UMAP - 聚类结果')
+
+# 按样本着色
+if 'sample' in adata.obs.columns:
+    sc.pl.umap(adata, color=['sample'], ax=axes[0, 1], show=False, legend_loc='on data')
+    axes[0, 1].set_title('UMAP - 样本分布')
+    
+    # 检查"批次驱动的分裂"
+    # 计算每个聚类中各样本的比例
+    cluster_sample_dist = pd.crosstab(adata.obs['cluster'], adata.obs['sample'])
+    cluster_sample_percent = cluster_sample_dist.div(cluster_sample_dist.sum(axis=1), axis=0) * 100
+    
+    # 找出被单一样本"垄断"的聚类（>80%来自同一样本）
+    monopolized_clusters = []
+    for cluster in cluster_sample_percent.index:
+        max_percent = cluster_sample_percent.loc[cluster].max()
+        if max_percent > 80:
+            monopolized_clusters.append(cluster)
+    
+    if monopolized_clusters:
+        print(f"⚠️ 发现 {len(monopolized_clusters)} 个可能被单一样本垄断的聚类: {monopolized_clusters}")
+else:
+    axes[0, 1].text(0.5, 0.5, '无样本信息', ha='center', va='center')
+
+# 按QC指标着色
+if 'n_genes_by_counts' in adata.obs.columns:
+    sc.pl.umap(adata, color=['n_genes_by_counts'], ax=axes[0, 2], show=False, cmap='viridis')
+    axes[0, 2].set_title('UMAP - 基因数')
+elif 'total_counts' in adata.obs.columns:
+    sc.pl.umap(adata, color=['total_counts'], ax=axes[0, 2], show=False, cmap='viridis')
+    axes[0, 2].set_title('UMAP - UMI数')
+
+# 标记基因热图
+if 'rank_genes_cluster' in adata.uns:
+    # 提取每个聚类的前5个标记基因
+    top_genes = []
+    for cluster in adata.obs['cluster'].unique():
+        try:
+            # 注意：cluster可能是字符串类型
+            cluster_genes = adata.uns['rank_genes_cluster']['names'][str(cluster)][:5]
+            top_genes.extend(cluster_genes)
+        except (KeyError, TypeError):
+            # 如果找不到这个聚类的标记基因，跳过
+            continue
+    
+    # 去重
+    top_genes = list(dict.fromkeys(top_genes))
+    
+    if len(top_genes) > 0:
+        # 方法1：使用scanpy的heatmap但手动设置ax
+        try:
+            # 先清空axes
+            axes[1, 0].clear()
+            
+            # 使用scanpy的heatmap，但不传递ax参数
+            sc.pl.heatmap(
+                adata,
+                var_names=top_genes[:20],  # 最多显示20个基因
+                groupby='cluster',
+                show=False,
+                cmap='RdBu_r',
+                swap_axes=True
+            )
+            
+            # 手动将图形保存到指定axes
+            fig = plt.gcf()
+            ax = fig.axes[0]
+            ax.figure = axes[1, 0].figure
+            axes[1, 0].figure.axes.append(ax)
+            
+        except Exception as e:
+            print(f"热图绘制失败: {e}")
+            # 方法2：手动绘制热图
+            try:
+                # 准备数据
+                from scipy import sparse
+                
+                # 获取表达矩阵
+                gene_indices = [list(adata.var_names).index(gene) for gene in top_genes[:20] if gene in adata.var_names]
+                if gene_indices:
+                    # 提取基因表达数据
+                    expr_data = adata[:, gene_indices].X
+                    if sparse.issparse(expr_data):
+                        expr_data = expr_data.toarray()
+                    
+                    # 按聚类排序
+                    cluster_order = sorted(adata.obs['cluster'].unique())
+                    cluster_indices = []
+                    for cluster in cluster_order:
+                        cluster_mask = adata.obs['cluster'] == cluster
+                        cluster_indices.extend(np.where(cluster_mask)[0])
+                    
+                    expr_data_sorted = expr_data[cluster_indices, :]
+                    
+                    # 绘制热图
+                    im = axes[1, 0].imshow(expr_data_sorted.T, aspect='auto', cmap='RdBu_r')
+                    axes[1, 0].set_xlabel('细胞（按聚类排序）')
+                    axes[1, 0].set_ylabel('基因')
+                    axes[1, 0].set_title('聚类标记基因热图')
+                    
+                    # 添加颜色条
+                    plt.colorbar(im, ax=axes[1, 0])
+                    
+            except Exception as e2:
+                print(f"手动热图也失败: {e2}")
+                axes[1, 0].text(0.5, 0.5, '热图绘制失败', ha='center', va='center')
+    else:
+        axes[1, 0].text(0.5, 0.5, '无标记基因数据', ha='center', va='center')
+else:
+    axes[1, 0].text(0.5, 0.5, '无标记基因数据', ha='center', va='center')
+
+axes[1, 0].set_title('聚类标记基因热图')
+
+# 聚类大小饼图
+cluster_sizes = adata.obs['cluster'].value_counts()
+axes[1, 1].pie(cluster_sizes.values, labels=cluster_sizes.index, 
+              autopct='%1.1f%%', startangle=90)
+axes[1, 1].axis('equal')
+axes[1, 1].set_title('聚类细胞数分布')
+
+# 样本在聚类中的分布
+if 'sample' in adata.obs.columns:
+    # 堆叠柱状图
+    cluster_sample_dist.plot(kind='bar', stacked=True, ax=axes[1, 2], 
+                           colormap='Set2')
+    axes[1, 2].set_xlabel('聚类')
+    axes[1, 2].set_ylabel('细胞数')
+    axes[1, 2].set_title('各聚类中样本分布')
+    axes[1, 2].legend(title='样本', bbox_to_anchor=(1.05, 1), loc='upper left')
+    axes[1, 2].tick_params(axis='x', rotation=45)
+else:
+    axes[1, 2].text(0.5, 0.5, '无样本信息', ha='center', va='center')
+
+plt.suptitle('单细胞聚类分析可视化', fontsize=16, y=1.02)
+plt.tight_layout()
+plt.savefig('clustering_visualization.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ 聚类可视化图: clustering_visualization.png")
+
+# 7.2 标记基因点图
+print("\n生成标记基因点图...")
+if 'rank_genes_cluster' in adata.uns and best_n_clusters > 0:
+    # 选择每个聚类的前3个标记基因
+    dotplot_genes = []
+    for cluster in np.sort(adata.obs['cluster'].unique().astype(int)):
+        cluster_genes = adata.uns['rank_genes_cluster']['names'][str(cluster)][:3]
+        dotplot_genes.extend(cluster_genes)
+    
+    dotplot_genes = list(dict.fromkeys(dotplot_genes))
+    
+    if len(dotplot_genes) > 0:
+        fig, ax = plt.subplots(figsize=(max(8, best_n_clusters*2), 8))
+        sc.pl.dotplot(
+            adata, 
+            var_names=dotplot_genes[:20],  # 最多20个基因
+            groupby='cluster',
+            ax=ax,
+            show=False,
+            cmap='RdBu_r',
+            standard_scale='var'
+        )
+        plt.tight_layout()
+        plt.savefig('marker_genes_dotplot.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print("✅ 标记基因点图: marker_genes_dotplot.png")
+
+# 7.3 样本特异性分析
+if 'sample' in adata.obs.columns and len(samples) > 1:
+    print("\n生成样本特异性分析图...")
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 各样本的聚类分布
+    sample_cluster_dist = pd.crosstab(adata.obs['sample'], adata.obs['cluster'])
+    sample_cluster_percent = sample_cluster_dist.div(sample_cluster_dist.sum(axis=1), axis=0) * 100
+    
+    sample_cluster_percent.plot(kind='bar', stacked=True, ax=axes[0], 
+                               colormap='tab20c')
+    axes[0].set_xlabel('样本')
+    axes[0].set_ylabel('百分比')
+    axes[0].set_title('各样本的聚类组成')
+    axes[0].legend(title='聚类', bbox_to_anchor=(1.05, 1), loc='upper left')
+    axes[0].tick_params(axis='x', rotation=45)
+    
+    # 样本间差异热图
+    axes[1].imshow(sample_cluster_percent.T, aspect='auto', cmap='YlOrRd')
+    axes[1].set_xlabel('样本')
+    axes[1].set_ylabel('聚类')
+    axes[1].set_title('样本-聚类组成热图')
+    axes[1].set_xticks(range(len(samples)))
+    axes[1].set_xticklabels(samples, rotation=45)
+    axes[1].set_yticks(range(best_n_clusters))
+    axes[1].set_yticklabels([f'C{i}' for i in range(best_n_clusters)])
+    plt.colorbar(axes[1].imshow(sample_cluster_percent.T, aspect='auto', cmap='YlOrRd'), 
+                 ax=axes[1], label='百分比')
+    
+    plt.tight_layout()
+    plt.savefig('sample_specific_analysis.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("✅ 样本特异性分析图: sample_specific_analysis.png")
+
+# ======== 步骤8：保存结果 ========
+print("\n" + "="*60)
+print("步骤8: 保存结果")
+print("="*60)
+
+# 保存分析结果
+adata.write('adata_integrated_clustered.h5ad')
+print("✅ 保存整合聚类数据: adata_integrated_clustered.h5ad")
+
+# 保存聚类结果
+adata.obs[['cluster']].to_csv('cell_clusters.csv')
+print("✅ 保存细胞聚类标签: cell_clusters.csv")
+
+# 保存标记基因
+if 'rank_genes_cluster' in adata.uns:
+    marker_genes = pd.DataFrame()
+    for cluster in adata.obs['cluster'].unique():
+        cluster_df = pd.DataFrame({
+            'gene': adata.uns['rank_genes_cluster']['names'][cluster],
+            'logfoldchanges': adata.uns['rank_genes_cluster']['logfoldchanges'][cluster],
+            'pvals': adata.uns['rank_genes_cluster']['pvals'][cluster],
+            'pvals_adj': adata.uns['rank_genes_cluster']['pvals_adj'][cluster],
+            'cluster': cluster
+        })
+        marker_genes = pd.concat([marker_genes, cluster_df])
+    
+    marker_genes.to_csv('cluster_marker_genes.csv', index=False)
+    print("✅ 保存聚类标记基因: cluster_marker_genes.csv")
+
+# 保存UMAP坐标
+umap_coords = pd.DataFrame(
+    adata.obsm['X_umap'],
+    columns=['UMAP1', 'UMAP2'],
+    index=adata.obs_names
+)
+umap_coords.to_csv('umap_coordinates.csv')
+print("✅ 保存UMAP坐标: umap_coordinates.csv")
+
+# 生成分析报告
+with open('integration_clustering_report.txt', 'w') as f:
+    f.write("="*60 + "\n")
+    f.write("单细胞整合、降维、聚类分析报告\n")
+    f.write("="*60 + "\n\n")
+    
+    f.write("1. 输入数据:\n")
+    f.write(f"   输入文件: adata_hv_scaled.h5ad\n")
+    f.write(f"   细胞数: {adata.n_obs}\n")
+    f.write(f"   高变基因数: {adata.n_vars}\n")
+    
+    if 'sample' in adata.obs.columns:
+        f.write(f"   样本数: {len(samples)}\n")
+        f.write(f"   样本: {list(samples)}\n\n")
+    
+    f.write("2. PCA降维:\n")
+    f.write(f"   主成分数: 50\n")
+    f.write(f"   达到80%方差: PC{pc_80}\n")
+    f.write(f"   达到90%方差: PC{pc_90}\n\n")
+    
+    if 'sample' in adata.obs.columns and len(samples) > 1:
+        f.write("3. 批次效应评估:\n")
+        f.write(f"   平均批次混合分数: {batch_mixing_scores.mean():.3f}\n")
+        
+        if use_harmony:
+            f.write(f"   批次校正: Harmony (已应用)\n")
+        else:
+            f.write(f"   批次校正: 未应用\n")
+        
+        if monopolized_clusters:
+            f.write(f"   ⚠️ 发现可能被单一样本垄断的聚类: {monopolized_clusters}\n")
+        f.write("\n")
+    
+    f.write("4. 聚类分析:\n")
+    f.write(f"   聚类方法: Leiden\n")
+    f.write(f"   分辨率: {best_resolution}\n")
+    f.write(f"   聚类数: {best_n_clusters}\n")
+    f.write(f"   聚类大小: {dict(adata.obs['cluster'].value_counts())}\n\n")
+    
+    f.write("5. 输出文件:\n")
+    f.write(f"   1. adata_integrated_clustered.h5ad - 完整分析数据\n")
+    f.write(f"   2. cell_clusters.csv - 细胞聚类标签\n")
+    f.write(f"   3. cluster_marker_genes.csv - 聚类标记基因\n")
+    f.write(f"   4. umap_coordinates.csv - UMAP坐标\n")
+    f.write(f"   5. pca_scree_plot.png - PCA碎石图\n")
+    f.write(f"   6. clustering_visualization.png - 聚类可视化\n")
+    f.write(f"   7. marker_genes_dotplot.png - 标记基因点图\n")
+    
+    if 'sample' in adata.obs.columns and len(samples) > 1:
+        f.write(f"   8. batch_effect_pca.png - 批次效应评估\n")
+        f.write(f"   9. batch_mixing_analysis.png - 批次混合分析\n")
+        f.write(f"   10. sample_specific_analysis.png - 样本特异性分析\n")
+        if use_harmony:
+            f.write(f"   11. harmony_correction.png - Harmony校正效果\n")
+
+print("✅ 分析报告: integration_clustering_report.txt")
+
+# 生成tSNE图
+# 检查是否已有tSNE坐标，如果没有则计算
+if 'X_tsne' not in adata.obsm_keys():
+    print("计算tSNE...")
+    sc.tl.tsne(adata, random_state=42)
+    print("✅ tSNE计算完成")
+else:
+    print("已有tSNE坐标")
+
+# 创建tSNE分群图
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# 忽略警告
+import warnings
+warnings.filterwarnings('ignore', message='No data for colormapping provided via.*')
+
+# 在tSNE空间查看聚类结果
+if 'cluster' in adata.obs.columns:
+    sc.pl.tsne(adata, color='cluster', ax=axes[0], show=False, legend_loc='on data')
+    axes[0].set_title('t-SNE - Clustering Distribution')
+else:
+    axes[0].text(0.5, 0.5, 'No cluster information', ha='center', va='center')
+    axes[0].set_title('t-SNE - Clustering Distribution')
+
+# 在tSNE空间查看样本分布
+if 'sample' in adata.obs.columns:
+    sc.pl.tsne(adata, color='sample', ax=axes[1], show=False, legend_loc='on data')
+    axes[1].set_title('t-SNE - Sample Distribution')
+else:
+    axes[1].text(0.5, 0.5, 'No sample information', ha='center', va='center')
+    axes[1].set_title('t-SNE - Sample Distribution')
+
+plt.suptitle('Cell Distribution in t-SNE Space', fontsize=14, y=1.02)
+plt.tight_layout()
+plt.savefig('tsne_clustering_distribution.png', dpi=150, bbox_inches='tight')
+plt.close()
+print("✅ tSNE分群图: tsne_clustering_distribution.png")
+##############################################################################
+
+##############################################################################
+# PCA可视化
+import matplotlib.pyplot as plt
+import scanpy as sc
+import numpy as np
+adata = sc.read('adata_integrated_clustered.h5ad')
+
+##############################################################################
+# 结果文件整理
+mkdir 01.qc_and_filter
+mv qc_comparison.png 01.qc_and_filter/
+mv qc_scatter.png 01.qc_and_filter/
+mv cell_metadata_before_qc.csv 01.qc_and_filter/
+mv cell_metadata_after_qc.csv 01.qc_and_filter/
+mv qc_by_sample.png 01.qc_and_filter/
+mv doublet_scores_0.png 01.qc_and_filter/
+mv doublet_scores_1.png 01.qc_and_filter/
+mv ctrl_qc_* 01.qc_and_filter/
+mv dm_qc_* 01.qc_and_filter/
+mv sample_cell_counts_comparison.png 01.qc_and_filter/
+qc_by_sample_before.png  qc_summary_report.txt
+mv qc_* 01.qc_and_filter/
+
+mkdir 02.doublet_cell_filter
+mv doublet_analysis.png 02.doublet_cell_filter/
+mv doublet_detection_report.txt 02.doublet_cell_filter/
+mv umap_doublet_sample.png 02.doublet_cell_filter/
+mv doublet_qc_correlation.png 02.doublet_cell_filter/
+
+mkdir 03.Normalization_and_HVGs
+mv highly_variable_genes_* 03.Normalization_and_HVGs/
+
+mkdir 04.PCA_tSNE_and_cluster/
+mv cluster_marker_genes.csv 04.PCA_tSNE_and_cluster/
+mv cell_clusters.csv 04.PCA_tSNE_and_cluster/
+mv umap_coordinates.csv 04.PCA_tSNE_and_cluster/
+mv integration_clustering_report.txt 04.PCA_tSNE_and_cluster/
+mv sample_specific_analysis.png 04.PCA_tSNE_and_cluster/
+mv marker_genes_dotplot.png 04.PCA_tSNE_and_cluster/
+mv normalization_report.txt 04.PCA_tSNE_and_cluster/
+mv pca_scree_plot.png 04.PCA_tSNE_and_cluster/
+mv batch_* 04.PCA_tSNE_and_cluster/
