@@ -1,1 +1,12 @@
+# 加载完整的Seurat对象
+merged_obj <- readRDS("objects/DCM_integrated_seurat_object.rds")
+# 检查关键元数据列是否存在
+if(!"group" %in% colnames(merged_obj@meta.data)) {
+  stop("对象中缺少 'group' 列，请确保含有 Ctrl/DM 分组信息")
+}
+if(!"predicted_celltype" %in% colnames(merged_obj@meta.data)) {
+  stop("对象中缺少 'predicted_celltype' 列，请先完成细胞类型注释")
+}
 
+# 查看分组和细胞类型概览
+table(merged_obj$group, merged_obj$predicted_celltype)
