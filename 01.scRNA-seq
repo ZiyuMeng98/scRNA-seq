@@ -46,21 +46,6 @@ mv SRR21566210/ dm/
 mv SRR21566211/ dm/
 
 cd ctrl/
-for NAME in SRR*; do
-    cat ${NAME}/${NAME}_*_*_R1_*.fastq.gz >> ctrl_S1_L001_R1_001.fastq.gz
-    cat ${NAME}/${NAME}_*_*_R2_*.fastq.gz >> ctrl_S1_L001_R2_001.fastq.gz
-done
-cd ../dm/
-for NAME in SRR*; do
-    cat ${NAME}/${NAME}_*_*_R1_*.fastq.gz >> dm_S1_L001_R1_001.fastq.gz
-    cat ${NAME}/${NAME}_*_*_R2_*.fastq.gz >> dm_S1_L001_R2_001.fastq.gz
-done
-
-# 合并所有样品进行
-cd ../
-echo "cellranger count --id=ctrl_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=ctrl --sample=ctrl --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
-echo "cellranger count --id=dm_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=dm --sample=dm --localcores=16 --localmem=64 --create-bam=true" >> command.cellranger_count.sh
-sh command.cellranger_count.sh
 # 单独对ctrl组四个样品进行
 cd ctrl/
 for NAME in $(ls -d SRR*); do 
@@ -73,1881 +58,1262 @@ for NAME in $(ls -d SRR*); do
 echo "cellranger count --id=${NAME}_out --transcriptome=/home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A_10×genomics/ --fastqs=${NAME} --sample=${NAME} --localcores=16 --localmem=64 --create-bam=true"; 
 done > command.cellranger_count.sh
 sh command.cellranger_count.sh
-
-##############################################################################
-# 质控和过滤
-# 以下在python3.8.4环境进行
-import matplotlib
-matplotlib.use('Agg')  # 必须在导入pyplot之前设置
-import matplotlib.pyplot as plt
-import scanpy as sc
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-import os
-
-# ======== 第三部分：分别读取和处理数据 ========
-print("="*60)
-print("开始分别处理Ctrl和DM组")
-print("="*60)
-
-# 定义质控函数
-def process_sample(adata, sample_name, condition_name, qc_params):
-    """对单个样本进行质控处理"""
-    print(f"\n处理样本: {sample_name} ({condition_name})")
-    
-    # 1. 计算QC指标
-    adata.var['mt'] = adata.var_names.str.startswith('mt-')
-    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
-    
-    # 2. 记录原始统计
-    n_cells_before = adata.n_obs
-    n_genes_before = adata.n_vars
-    
-    # 3. 质控过滤
-    qc_pass = ((adata.obs['n_genes_by_counts'] > qc_params['nFeature_min']) & 
-               (adata.obs['n_genes_by_counts'] < qc_params['nFeature_max']) & 
-               (adata.obs['pct_counts_mt'] < qc_params['mt_percent_max']))
-    
-    adata_qc = adata[qc_pass, :].copy()
-    n_cells_after = adata_qc.n_obs
-    
-    # 4. 打印统计
-    print(f"  原始细胞数: {n_cells_before}")
-    print(f"  质控后细胞数: {n_cells_after}")
-    print(f"  过滤细胞数: {n_cells_before - n_cells_after}")
-    print(f"  保留比例: {n_cells_after/n_cells_before:.2%}")
-    
-    # 5. 添加样本标签
-    adata_qc.obs['sample'] = sample_name
-    adata_qc.obs['condition'] = condition_name
-    
-    return adata, adata_qc
-
-# ======== 分别处理Ctrl和DM ========
-# 读取数据
-print("\n读取数据...")
-ctrl_adata_raw = sc.read_10x_mtx("ctrl_out/outs/filtered_feature_bc_matrix/", var_names='gene_symbols', cache=True)
-dm_adata_raw = sc.read_10x_mtx("dm_out/outs/filtered_feature_bc_matrix/", var_names='gene_symbols', cache=True)
-
-# 设置质控参数
-qc_params = {'nFeature_min': 200, 'nFeature_max': 6000, 'mt_percent_max': 20}
-
-# 分别处理Ctrl组
-print("\n" + "="*60)
-print("Ctrl组质控分析")
-print("="*60)
-ctrl_adata, ctrl_adata_qc = process_sample(ctrl_adata_raw, 'Ctrl', 'Control', qc_params)
-
-# 分别处理DM组
-print("\n" + "="*60)
-print("DM组质控分析")
-print("="*60)
-dm_adata, dm_adata_qc = process_sample(dm_adata_raw, 'DM', 'Diabetes', qc_params)
-
-# ======== 第四部分：分别可视化 ========
-print("\n" + "="*60)
-print("生成各组质控可视化图形")
-print("="*60)
-
-def create_qc_plots(adata, adata_qc, sample_name, save_prefix):
-    """为单个样本创建QC图"""
-    # 创建QC对比图
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    
-    # 质控前
-    sc.pl.violin(adata, ['n_genes_by_counts'], ax=axes[0, 0], show=False)
-    axes[0, 0].set_title(f'{sample_name} - Genes before QC')
-    
-    sc.pl.violin(adata, ['total_counts'], ax=axes[0, 1], show=False)
-    axes[0, 1].set_title(f'{sample_name} - UMIs before QC')
-    
-    sc.pl.violin(adata, ['pct_counts_mt'], ax=axes[0, 2], show=False)
-    axes[0, 2].set_title(f'{sample_name} - MT% before QC')
-    
-    # 质控后
-    sc.pl.violin(adata_qc, ['n_genes_by_counts'], ax=axes[1, 0], show=False)
-    axes[1, 0].set_title(f'{sample_name} - Genes after QC')
-    
-    sc.pl.violin(adata_qc, ['total_counts'], ax=axes[1, 1], show=False)
-    axes[1, 1].set_title(f'{sample_name} - UMIs after QC')
-    
-    sc.pl.violin(adata_qc, ['pct_counts_mt'], ax=axes[1, 2], show=False)
-    axes[1, 2].set_title(f'{sample_name} - MT% after QC')
-    
-    plt.suptitle(f'{sample_name}组质控前后对比', fontsize=16, y=1.02)
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_qc_comparison.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"✅ {sample_name}组QC对比图: {save_prefix}_qc_comparison.png")
-    
-    # 散点图
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    sc.pl.scatter(adata, x='total_counts', y='pct_counts_mt', ax=axes[0], show=False)
-    axes[0].set_title(f'{sample_name} - UMIs vs MT% (Before QC)')
-    
-    sc.pl.scatter(adata_qc, x='total_counts', y='pct_counts_mt', ax=axes[1], show=False)
-    axes[1].set_title(f'{sample_name} - UMIs vs MT% (After QC)')
-    
-    plt.suptitle(f'{sample_name}组UMIs vs MT%分布', fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_qc_scatter.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"✅ {sample_name}组散点图: {save_prefix}_qc_scatter.png")
-
-# 为Ctrl组创建图形
-create_qc_plots(ctrl_adata, ctrl_adata_qc, 'Ctrl', 'ctrl')
-
-# 为DM组创建图形
-create_qc_plots(dm_adata, dm_adata_qc, 'DM', 'dm')
-
-# ======== 第五部分：合并数据 ========
-print("\n" + "="*60)
-print("合并质控后的数据")
-print("="*60)
-
-# 合并质控后的数据
-adata_qc = ctrl_adata_qc.concatenate(
-    dm_adata_qc, 
-    batch_key='sample',
-    batch_categories=['Ctrl', 'DM']
-)
-
-print(f"合并后总细胞数: {adata_qc.n_obs}, 总基因数: {adata_qc.n_vars}")
-
-# 查看样本分布
-print("\n各样本细胞数:")
-for sample in ['Ctrl', 'DM']:
-    n_cells = (adata_qc.obs['sample'] == sample).sum()
-    print(f"  {sample}: {n_cells} 个细胞")
-
-# ======== 第六部分：创建组合对比图 ========
-print("\n生成组合对比图...")
-
-# 1. 各组细胞数对比
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 质控前细胞数
-before_counts = [ctrl_adata.n_obs, dm_adata.n_obs]
-axes[0].bar(['Ctrl', 'DM'], before_counts, color=['skyblue', 'lightcoral'])
-axes[0].set_title('质控前细胞数')
-axes[0].set_ylabel('细胞数')
-for i, v in enumerate(before_counts):
-    axes[0].text(i, v, str(v), ha='center', va='bottom')
-
-# 质控后细胞数
-after_counts = [ctrl_adata_qc.n_obs, dm_adata_qc.n_obs]
-axes[1].bar(['Ctrl', 'DM'], after_counts, color=['deepskyblue', 'tomato'])
-axes[1].set_title('质控后细胞数')
-axes[1].set_ylabel('细胞数')
-for i, v in enumerate(after_counts):
-    axes[1].text(i, v, str(v), ha='center', va='bottom')
-
-plt.suptitle('Ctrl vs DM 质控前后细胞数对比', fontsize=14, y=1.05)
-plt.tight_layout()
-plt.savefig('sample_cell_counts_comparison.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 样本细胞数对比图: sample_cell_counts_comparison.png")
-
-# 2. 各组QC指标对比小提琴图
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-# 创建临时合并数据用于可视化
-adata_combined = ctrl_adata.concatenate(dm_adata, batch_key='sample', batch_categories=['Ctrl', 'DM'])
-adata_qc_combined = ctrl_adata_qc.concatenate(dm_adata_qc, batch_key='sample', batch_categories=['Ctrl', 'DM'])
-
-# 质控前的分组图
-sc.pl.violin(adata_combined, 'n_genes_by_counts', groupby='sample', ax=axes[0], show=False)
-axes[0].set_title('Genes per cell (Before QC)')
-
-sc.pl.violin(adata_combined, 'total_counts', groupby='sample', ax=axes[1], show=False)
-axes[1].set_title('UMIs per cell (Before QC)')
-
-sc.pl.violin(adata_combined, 'pct_counts_mt', groupby='sample', ax=axes[2], show=False)
-axes[2].set_title('MT% (Before QC)')
-
-plt.suptitle('各组QC指标分布（质控前）', fontsize=14, y=1.05)
-plt.tight_layout()
-plt.savefig('qc_by_sample_before.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 质控前分组图: qc_by_sample_before.png")
-
-# ======== 第七部分：保存数据和报告 ========
-print("\n" + "="*60)
-print("保存结果")
-print("="*60)
-
-# 保存合并后的质控数据
-adata_qc.write('adata_qc_filtered.h5ad')
-print("✅ 合并质控数据: adata_qc_filtered.h5ad")
-
-# 分别保存各组数据
-ctrl_adata_qc.write('ctrl_adata_qc.h5ad')
-dm_adata_qc.write('dm_adata_qc.h5ad')
-print("✅ Ctrl组质控数据: ctrl_adata_qc.h5ad")
-print("✅ DM组质控数据: dm_adata_qc.h5ad")
-
-# 生成质控报告
-with open('qc_summary_report.txt', 'w') as f:
-    f.write("="*60 + "\n")
-    f.write("单细胞RNA-seq质控分析报告\n")
-    f.write("="*60 + "\n\n")
-    
-    f.write("1. Ctrl组质控结果:\n")
-    f.write(f"   原始细胞数: {ctrl_adata.n_obs}\n")
-    f.write(f"   质控后细胞数: {ctrl_adata_qc.n_obs}\n")
-    f.write(f"   过滤细胞数: {ctrl_adata.n_obs - ctrl_adata_qc.n_obs}\n")
-    f.write(f"   保留比例: {ctrl_adata_qc.n_obs/ctrl_adata.n_obs:.2%}\n\n")
-    
-    f.write("2. DM组质控结果:\n")
-    f.write(f"   原始细胞数: {dm_adata.n_obs}\n")
-    f.write(f"   质控后细胞数: {dm_adata_qc.n_obs}\n")
-    f.write(f"   过滤细胞数: {dm_adata.n_obs - dm_adata_qc.n_obs}\n")
-    f.write(f"   保留比例: {dm_adata_qc.n_obs/dm_adata.n_obs:.2%}\n\n")
-    
-    f.write("3. 总体统计:\n")
-    f.write(f"   总细胞数（合并后）: {adata_qc.n_obs}\n")
-    f.write(f"   Ctrl占比: {ctrl_adata_qc.n_obs/adata_qc.n_obs:.1%}\n")
-    f.write(f"   DM占比: {dm_adata_qc.n_obs/adata_qc.n_obs:.1%}\n\n")
-    
-    f.write("4. 质控参数:\n")
-    for key, value in qc_params.items():
-        f.write(f"   {key}: {value}\n")
-
-print("✅ 质控报告: qc_summary_report.txt")
-
-print("\n" + "="*60)
-print("质控分析完成！")
-print("="*60)
-print(f"Ctrl组: {ctrl_adata_qc.n_obs} 个细胞")
-print(f"DM组: {dm_adata_qc.n_obs} 个细胞")
-print(f"总计: {adata_qc.n_obs} 个细胞")
-
-# 双细胞过滤
-# 在Python中，我们使用Scrublet作为DoubletFinder的替代
-sc.external.pl.scrublet_score_distribution(adata_qc, scale_hist_sim='log', figsize=(8, 4))
-plt.savefig('scrublet_score_distribution.png', dpi=150, bbox_inches='tight')
-plt.close()
-
-# 在 UMAP 上查看双细胞分布
-print("标准化和降维...")
-
-# 1. 标准化
-sc.pp.normalize_total(adata_qc, target_sum=1e4)
-sc.pp.log1p(adata_qc)
-
-# 2. 高变基因
-sc.pp.highly_variable_genes(adata_qc, min_mean=0.0125, max_mean=3, min_disp=0.5)
-adata_qc = adata_qc[:, adata_qc.var.highly_variable]
-
-# 3. 缩放
-sc.pp.scale(adata_qc, max_value=10)
-
-# 4. PCA降维
-sc.tl.pca(adata_qc, svd_solver='arpack')
-
-# 5. 检查PCA结果
-sc.pl.pca_variance_ratio(adata_qc, log=True, save='_pca_variance.png')
-
-# ======== 邻居图和UMAP ========
-print("构建邻居图...")
-
-# 修复数据类型
-adata_qc.obs['predicted_doublet'] = adata_qc.obs['predicted_doublet'].astype('category')
-adata_qc.obs['sample'] = adata_qc.obs['sample'].astype('category')
-
-# 计算邻居图（使用PCA结果）
-sc.pp.neighbors(adata_qc, n_neighbors=10, n_pcs=40)
-
-# UMAP降维
-print("计算UMAP...")
-sc.tl.umap(adata_qc)
-
-# ======== 可视化 ========
-print("生成可视化图形...")
-
-# 1. 双细胞在UMAP上的分布
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 按双细胞状态着色
-sc.pl.umap(adata_qc, color=['predicted_doublet'], ax=axes[0], show=False, legend_loc='on data')
-axes[0].set_title('Doublet Detection')
-
-# 按样本着色
-sc.pl.umap(adata_qc, color=['sample'], ax=axes[1], show=False, legend_loc='on data')
-axes[1].set_title('Sample Grouping')
-
-plt.suptitle('UMAP', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('umap_doublet_sample.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ UMAP图: umap_doublet_sample.png")
-
-# 2. 双细胞分数分布
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 按样本分组的双细胞分数
-sc.pl.violin(adata_qc, 'doublet_score', groupby='sample', ax=axes[0], show=False)
-axes[0].set_title('Distribution of Doublet Scores Across Samples')
-
-# 双细胞分数的UMAP
-sc.pl.umap(adata_qc, color=['doublet_score'], ax=axes[1], show=False, cmap='viridis')
-axes[1].set_title('Doublet Scores on UMAP')
-
-plt.suptitle('Doublet Detection Analysis', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('doublet_analysis.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 双细胞分析图: doublet_analysis.png")
-
-# 3. 详细的散点图
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-# 双细胞分数与基因数
-sc.pl.scatter(adata_qc, x='n_genes_by_counts', y='doublet_score', 
-              color='predicted_doublet', ax=axes[0], show=False)
-axes[0].set_title('双细胞分数 vs 基因数')
-
-# 双细胞分数与UMI数
-sc.pl.scatter(adata_qc, x='total_counts', y='doublet_score', 
-              color='predicted_doublet', ax=axes[1], show=False)
-axes[1].set_title('双细胞分数 vs UMI数')
-
-# 双细胞分数与线粒体比例
-sc.pl.scatter(adata_qc, x='pct_counts_mt', y='doublet_score', 
-              color='predicted_doublet', ax=axes[2], show=False)
-axes[2].set_title('双细胞分数 vs 线粒体%')
-
-plt.suptitle('双细胞与QC指标关系', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('doublet_qc_correlation.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 双细胞-QC关系图: doublet_qc_correlation.png")
-
-# ======== 统计报告 ========
-print("\n" + "="*60)
-print("双细胞检测统计报告")
-print("="*60)
-
-# 总体统计
-total_cells = adata_qc.n_obs
-total_doublets = (adata_qc.obs['predicted_doublet'] == True).sum()
-doublet_rate = total_doublets / total_cells
-
-print(f"总细胞数: {total_cells}")
-print(f"双细胞数: {total_doublets}")
-print(f"双细胞比例: {doublet_rate:.2%}")
-
-# 按样本统计
-print("\n按样本统计:")
-for sample in ['Ctrl', 'DM']:
-    sample_mask = adata_qc.obs['sample'] == sample
-    n_cells = sample_mask.sum()
-    n_doublets = (adata_qc.obs.loc[sample_mask, 'predicted_doublet'] == True).sum()
-    sample_rate = n_doublets / n_cells if n_cells > 0 else 0
-    
-    print(f"  {sample}:")
-    print(f"    细胞数: {n_cells}")
-    print(f"    双细胞数: {n_doublets}")
-    print(f"    比例: {sample_rate:.2%}")
-    
-    # 双细胞分数的统计
-    scores = adata_qc.obs.loc[sample_mask, 'doublet_score']
-    mean_score = scores.mean()
-    median_score = scores.median()
-    print(f"    平均分数: {mean_score:.3f}")
-    print(f"    中位数: {median_score:.3f}")
-
-# 保存最终数据
-adata_qc.write('adata_qc_clean.h5ad')
-print("\n✅ 数据已保存: adata_qc_with_umap.h5ad")
-
-# 生成报告
-with open('doublet_detection_report.txt', 'w') as f:
-    f.write("="*60 + "\n")
-    f.write("双细胞检测报告\n")
-    f.write("="*60 + "\n\n")
-    
-    f.write(f"总细胞数: {total_cells}\n")
-    f.write(f"双细胞数: {total_doublets}\n")
-    f.write(f"双细胞比例: {doublet_rate:.2%}\n\n")
-    
-    f.write("按样本统计:\n")
-    for sample in ['Ctrl', 'DM']:
-        sample_mask = adata_qc.obs['sample'] == sample
-        n_cells = sample_mask.sum()
-        n_doublets = (adata_qc.obs.loc[sample_mask, 'predicted_doublet'] == True).sum()
-        sample_rate = n_doublets / n_cells if n_cells > 0 else 0
-        f.write(f"  {sample}: {n_cells}细胞, {n_doublets}双细胞 ({sample_rate:.2%})\n")
-
-print("✅ 报告已保存: doublet_detection_report.txt")
-print("\n双细胞检测和可视化完成！")
-##############################################################################
-
-##############################################################################
-# 归一化和高变基因选择
-# 以下在python3.8.4环境进行
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import scanpy as sc
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-import seaborn as sns
-from scipy import sparse
-import os
-
-# ======== 步骤1：加载数据并检查NaN ========
-print("="*60)
-print("步骤1: 加载数据并检查数据质量")
-print("="*60)
-
-# 加载你的数据
-adata = sc.read('adata_qc_clean.h5ad')
-print(f"数据形状: {adata.shape}")
-print(f"总细胞数: {adata.n_obs}")
-print(f"总基因数: {adata.n_vars}")
-
-# 检查NaN值
-print("\n检查数据中的NaN值...")
-if sparse.issparse(adata.X):
-    # 稀疏矩阵检查
-    nnz = adata.X.nnz
-    total_elements = adata.n_obs * adata.n_vars
-    sparsity = 1 - (nnz / total_elements)
-    print(f"稀疏矩阵: 非零元素 = {nnz}, 稀疏性 = {sparsity:.2%}")
-    
-    # 检查是否有显式的NaN
-    if hasattr(adata.X, 'data'):
-        nan_count = np.isnan(adata.X.data).sum()
-        print(f"稀疏矩阵中的NaN值: {nan_count}")
-else:
-    # 稠密矩阵检查
-    nan_count = np.isnan(adata.X).sum()
-    print(f"稠密矩阵中的NaN值: {nan_count}")
-
-# 检查基因的平均表达
-print("\n计算基因平均表达...")
-if sparse.issparse(adata.X):
-    # 对稀疏矩阵高效计算
-    gene_means = np.array(adata.X.mean(axis=0)).flatten()
-else:
-    gene_means = adata.X.mean(axis=0)
-
-print(f"基因平均表达范围: [{gene_means.min():.3e}, {gene_means.max():.3e}]")
-print(f"平均表达为0的基因数: {(gene_means == 0).sum()}")
-
-# 检查是否有无限值
-if not sparse.issparse(adata.X):
-    inf_count = np.isinf(adata.X).sum()
-    print(f"无限值数量: {inf_count}")
-
-# ======== 步骤2：数据归一化 ========
-print("\n" + "="*60)
-print("步骤2: 数据归一化")
-print("="*60)
-
-# 检查当前数据
-print("检查当前数据...")
-if sparse.issparse(adata.X):
-    current_sum = adata.X.sum()
-    if hasattr(current_sum, 'toarray'):
-        current_sum = current_sum.toarray()[0,0]
-    print(f"当前总表达量: {current_sum:.1f}")
-else:
-    print(f"当前总表达量: {adata.X.sum():.1f}")
-
-# 2.1 总计数归一化
-print("\n2.1 总计数归一化到10,000")
-try:
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    print(f"归一化后平均总计数: {adata.X.sum(axis=1).mean():.1f}")
-except Exception as e:
-    print(f"归一化出错: {e}")
-    print("尝试手动归一化...")
-    # 手动归一化
-    from sklearn.preprocessing import normalize
-    if sparse.issparse(adata.X):
-        adata.X = normalize(adata.X, norm='l1', axis=1) * 1e4
-    else:
-        adata.X = normalize(adata.X, norm='l1', axis=1) * 1e4
-    print(f"手动归一化完成，平均总计数: {adata.X.sum(axis=1).mean():.1f}")
-
-# 2.2 对数转换
-print("\n2.2 对数转换 (log1p)")
-try:
-    sc.pp.log1p(adata)
-    print("✅ 对数转换完成")
-except Exception as e:
-    print(f"对数转换出错: {e}")
-    print("确保数据非负...")
-    # 确保数据非负
-    if sparse.issparse(adata.X):
-        adata.X.data = np.maximum(adata.X.data, 0)
-    else:
-        adata.X = np.maximum(adata.X, 0)
-    sc.pp.log1p(adata)
-    print("对数转换完成")
-
-# 再次检查NaN
-if not sparse.issparse(adata.X):
-    nan_after = np.isnan(adata.X).sum()
-    print(f"归一化后NaN值: {nan_after}")
-    if nan_after > 0:
-        print("⚠️ 仍有NaN值，替换为0")
-        adata.X = np.nan_to_num(adata.X, nan=0.0)
-
-# 保存归一化后的数据
-adata.write('adata_normalized.h5ad')
-print("✅ 保存归一化数据: adata_normalized.h5ad")
-
-# ======== 步骤3：高变基因选择（修复版） ========
-print("\n" + "="*60)
-print("步骤3: 高变基因选择（修复版）")
-print("="*60)
-
-# 3.1 手动计算高变基因
-print("手动计算基因统计...")
-
-# 计算每个基因的均值和方差
-if sparse.issparse(adata.X):
-    # 稀疏矩阵的高效计算
-    gene_means = np.array(adata.X.mean(axis=0)).flatten()
-    # 计算方差
-    gene_vars = np.array((adata.X.power(2)).mean(axis=0)).flatten() - gene_means**2
-else:
-    gene_means = adata.X.mean(axis=0)
-    gene_vars = adata.X.var(axis=0)
-
-# 避免除零错误
-epsilon = 1e-10
-gene_vars = np.maximum(gene_vars, epsilon)
-
-# 计算离散度
-gene_dispersions = gene_vars / (gene_means + epsilon)
-
-# 存储到adata.var
-adata.var['means'] = gene_means
-adata.var['variances'] = gene_vars
-adata.var['dispersions'] = gene_dispersions
-
-print(f"基因统计:")
-print(f"  平均表达范围: [{gene_means.min():.3e}, {gene_means.max():.3e}]")
-print(f"  方差范围: [{gene_vars.min():.3e}, {gene_vars.max():.3e}]")
-print(f"  离散度范围: [{gene_dispersions.min():.3e}, {gene_dispersions.max():.3e}]")
-
-# 3.2 手动选择高变基因
-print("\n手动选择高变基因...")
-
-# 过滤低表达基因
-min_mean_threshold = 0.01
-mean_filter = gene_means >= min_mean_threshold
-print(f"平均表达 >= {min_mean_threshold} 的基因数: {mean_filter.sum()}")
-
-if mean_filter.sum() < 100:
-    print("⚠️ 高表达基因太少，降低阈值...")
-    min_mean_threshold = 0.001
-    mean_filter = gene_means >= min_mean_threshold
-    print(f"新阈值下基因数: {mean_filter.sum()}")
-
-# 归一化离散度
-from scipy import stats
-valid_dispersions = gene_dispersions[mean_filter]
-if len(valid_dispersions) > 0:
-    # 归一化到均值为0，标准差为1
-    disp_norm = stats.zscore(np.log1p(valid_dispersions))
-    disp_norm = np.nan_to_num(disp_norm, nan=0.0)
-    
-    # 选择top基因
-    n_top_genes = min(2000, mean_filter.sum())
-    if n_top_genes > 0:
-        # 按归一化离散度排序
-        top_indices = np.argsort(disp_norm)[-n_top_genes:]
-        # 获取原始索引
-        all_indices = np.where(mean_filter)[0]
-        top_gene_indices = all_indices[top_indices]
-        
-        # 标记高变基因
-        adata.var['highly_variable'] = False
-        adata.var.iloc[top_gene_indices, adata.var.columns.get_loc('highly_variable')] = True
-        adata.var['dispersions_norm'] = 0.0
-        adata.var.iloc[all_indices, adata.var.columns.get_loc('dispersions_norm')] = disp_norm
-        
-        n_hv_genes = adata.var['highly_variable'].sum()
-        print(f"✅ 选择高变基因数: {n_hv_genes}")
-    else:
-        print("⚠️ 没有符合条件的基因，使用所有基因")
-        adata.var['highly_variable'] = True
-        n_hv_genes = adata.n_vars
-else:
-    print("⚠️ 没有有效的离散度值，使用所有基因")
-    adata.var['highly_variable'] = True
-    n_hv_genes = adata.n_vars
-
-print(f"高变基因比例: {n_hv_genes/adata.n_vars:.2%}")
-
-# 3.3 可视化
-print("\n生成高变基因可视化...")
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 均值-离散度图
-if 'dispersions_norm' in adata.var.columns:
-    # 所有基因
-    axes[0].scatter(adata.var['means'], adata.var['dispersions_norm'], 
-                   alpha=0.1, s=5, c='gray', label='all Genes')
-    
-    # 高变基因
-    hv_mask = adata.var['highly_variable']
-    axes[0].scatter(adata.var.loc[hv_mask, 'means'], 
-                   adata.var.loc[hv_mask, 'dispersions_norm'],
-                   alpha=0.7, s=10, c='red', label='HVGs')
-    
-    axes[0].set_xlabel('平均表达 (log)')
-    axes[0].set_ylabel('归一化离散度')
-    axes[0].set_title('高变基因选择')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-else:
-    axes[0].text(0.5, 0.5, '无离散度数据', ha='center', va='center')
-    axes[0].set_title('HVGs')
-
-# 基因分类统计
-categories = ['HVGs', 'Not HVGs']
-values = [n_hv_genes, adata.n_vars - n_hv_genes]
-colors = ['lightcoral', 'lightblue']
-
-bars = axes[1].bar(categories, values, color=colors)
-axes[1].set_ylabel('Number of genes')
-axes[1].set_title('Gene Classification Statistics')
-
-for bar, value in zip(bars, values):
-    height = bar.get_height()
-    axes[1].text(bar.get_x() + bar.get_width()/2., height + 5,
-                f'{value}', ha='center', va='bottom')
-
-plt.tight_layout()
-plt.savefig('highly_variable_genes_fixed.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 高变基因选择图: highly_variable_genes_fixed.png")
-
-# ======== 步骤4：提取高变基因子集 ========
-print("\n" + "="*60)
-print("步骤4: 提取高变基因子集")
-print("="*60)
-
-print("提取高变基因子集...")
-adata_hv = adata[:, adata.var['highly_variable']].copy()
-print(f"原始数据形状: {adata.shape}")
-print(f"高变基因子集形状: {adata_hv.shape}")
-
-# ======== 步骤5：数据缩放 ========
-print("\n" + "="*60)
-print("步骤5: 数据缩放")
-print("="*60)
-
-print("对高变基因进行缩放...")
-try:
-    sc.pp.scale(adata_hv, max_value=10)
-    print("✅ 缩放完成")
-except Exception as e:
-    print(f"缩放出错: {e}")
-    print("手动缩放...")
-    from sklearn.preprocessing import StandardScaler
-    if sparse.issparse(adata_hv.X):
-        dense_data = adata_hv.X.toarray()
-    else:
-        dense_data = adata_hv.X
-    
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(dense_data)
-    # 限制极端值
-    scaled_data = np.clip(scaled_data, -10, 10)
-    
-    if sparse.issparse(adata_hv.X):
-        adata_hv.X = sparse.csr_matrix(scaled_data)
-    else:
-        adata_hv.X = scaled_data
-    print("手动缩放完成")
-
-# 保存缩放后的高变基因子集
-adata_hv.write('adata_hv_scaled.h5ad')
-print("✅ 保存缩放后高变基因子集: adata_hv_scaled.h5ad")
-
-# ======== 步骤6：保存结果 ========
-print("\n" + "="*60)
-print("步骤6: 保存结果")
-print("="*60)
-
-# 保存高变基因列表
-hv_genes = adata.var_names[adata.var['highly_variable']].tolist()
-pd.DataFrame({'gene': hv_genes}).to_csv('highly_variable_genes_list.csv', index=False)
-print("✅ 高变基因列表: highly_variable_genes_list.csv")
-
-# 保存完整数据
-adata.write('adata_with_hv_markers.h5ad')
-print("✅ 完整数据: adata_with_hv_markers.h5ad")
-
-# 生成报告
-with open('normalization_report_fixed.txt', 'w') as f:
-    f.write("="*60 + "\n")
-    f.write("归一化和高变基因选择报告（修复版）\n")
-    f.write("="*60 + "\n\n")
-    
-    f.write(f"输入文件: adata_qc_clean.h5ad\n")
-    f.write(f"细胞数: {adata.n_obs}\n")
-    f.write(f"基因数: {adata.n_vars}\n\n")
-    
-    f.write("归一化方法: normalize_total + log1p\n")
-    f.write("目标总计数: 10,000\n\n")
-    
-    f.write("高变基因选择（手动）:\n")
-    f.write(f"  高变基因数: {n_hv_genes}\n")
-    f.write(f"  比例: {n_hv_genes/adata.n_vars:.2%}\n")
-    f.write(f"  最小平均表达阈值: {min_mean_threshold}\n")
-    f.write(f"  目标基因数: 2000\n")
-    f.write(f"  实际选择: {n_hv_genes}\n\n")
-    
-    f.write("数据缩放: StandardScaler (限制范围: -10 to 10)\n\n")
-    
-    f.write("输出文件:\n")
-    f.write("  1. adata_normalized.h5ad - 归一化数据\n")
-    f.write("  2. adata_hv_scaled.h5ad - 缩放后高变基因子集\n")
-    f.write("  3. adata_with_hv_markers.h5ad - 完整数据\n")
-    f.write("  4. highly_variable_genes_list.csv - 高变基因列表\n")
-    f.write("  5. highly_variable_genes_fixed.png - 可视化图\n")
-
-print("✅ 报告: normalization_report_fixed.txt")
-
-print("\n" + "="*60)
-print("✅ 归一化和高变基因选择完成！")
-print("="*60)
-print(f"\n下一步使用 adata_hv_scaled.h5ad 进行PCA降维")
-##############################################################################
-
-##############################################################################
-# PCA降维和聚类
-# 以下在python3.8.4环境进行
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import scanpy as sc
-import pandas as pd
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-import seaborn as sns
-from scipy import sparse
-import os
-import sys
-
-# 检查是否安装了harmony
-try:
-    import harmonypy
-    HARMONY_AVAILABLE = True
-except ImportError:
-    print("未安装harmonypy，将使用scanpy内置方法")
-    HARMONY_AVAILABLE = False
-
-# ======== 步骤1：加载数据 ========
-print("="*60)
-print("步骤1: 加载缩放后的高变基因数据")
-print("="*60)
-
-# 加载数据
-adata = sc.read('adata_hv_scaled.h5ad')
-print(f"数据形状: {adata.shape}")
-print(f"细胞数: {adata.n_obs}")
-print(f"高变基因数: {adata.n_vars}")
-
-# 检查样本信息
-if 'sample' in adata.obs.columns:
-    samples = adata.obs['sample'].unique()
-    print(f"样本: {samples}")
-    print(f"样本分布:\n{adata.obs['sample'].value_counts()}")
-else:
-    print("⚠️ 未找到sample列，需要添加样本信息")
-
-# ======== 步骤2：PCA降维 ========
-print("\n" + "="*60)
-print("步骤2: PCA降维")
-print("="*60)
-
-# 运行PCA
-print("运行PCA...")
-sc.tl.pca(adata, svd_solver='arpack', n_comps=50)
-print(f"PCA完成，主成分数: {adata.obsm['X_pca'].shape[1]}")
-
-# 查看PCA方差解释
-print("\nPCA方差解释（前10个主成分）:")
-variance_ratio = adata.uns['pca']['variance_ratio']
-for i, ratio in enumerate(variance_ratio[:10], 1):
-    print(f"  PC{i}: {ratio:.3%}")
-
-# 累积方差解释
-cumulative_variance = np.cumsum(variance_ratio)
-pc_80 = np.argmax(cumulative_variance >= 0.8) + 1
-pc_90 = np.argmax(cumulative_variance >= 0.9) + 1
-print(f"\n达到80%方差解释需要: PC{pc_80}")
-print(f"达到90%方差解释需要: PC{pc_90}")
-
-# 绘制碎石图
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 碎石图
-axes[0].plot(range(1, len(variance_ratio) + 1), variance_ratio, marker='o', alpha=0.7)
-axes[0].axvline(x=pc_80, color='red', linestyle='--', alpha=0.5, label=f'PC{pc_80} (80%)')
-axes[0].axvline(x=pc_90, color='green', linestyle='--', alpha=0.5, label=f'PC{pc_90} (90%)')
-axes[0].set_xlabel('主成分')
-axes[0].set_ylabel('方差解释比例')
-axes[0].set_title('PCA碎石图')
-axes[0].legend()
-axes[0].grid(True, alpha=0.3)
-
-# 累积方差
-axes[1].plot(range(1, len(cumulative_variance) + 1), cumulative_variance, marker='o', alpha=0.7, color='orange')
-axes[1].axhline(y=0.8, color='red', linestyle='--', alpha=0.5, label='80%方差')
-axes[1].axhline(y=0.9, color='green', linestyle='--', alpha=0.5, label='90%方差')
-axes[1].set_xlabel('主成分数')
-axes[1].set_ylabel('累积方差解释')
-axes[1].set_title('累积方差解释')
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('pca_scree_plot.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ PCA碎石图: pca_scree_plot.png")
-
-# ======== 步骤3：批次效应评估 ========
-print("\n" + "="*60)
-print("步骤3: 批次效应评估")
-print("="*60)
-
-if 'sample' in adata.obs.columns and len(samples) > 1:
-    print(f"检测到 {len(samples)} 个样本，评估批次效应...")
-    
-    # 在PCA空间查看批次分离
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # PC1 vs PC2
-    sc.pl.pca(adata, color='sample', ax=axes[0], show=False, legend_loc='on data')
-    axes[0].set_title('PC1 vs PC2 (按样本着色)')
-    
-    # PC1 vs PC3
-    sc.pl.pca(adata, color='sample', components=['1,3'], ax=axes[1], show=False, legend_loc='on data')
-    axes[1].set_title('PC1 vs PC3 (按样本着色)')
-    
-    plt.suptitle('PCA空间中的批次效应', fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.savefig('batch_effect_pca.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✅ 批次效应评估图: batch_effect_pca.png")
-    
-    # 计算批次混合指标
-    print("\n计算批次混合指标...")
-    from sklearn.neighbors import NearestNeighbors
-    
-    def calculate_batch_mixing(pca_coords, batch_labels, k=50):
-        """计算批次混合程度"""
-        nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='ball_tree').fit(pca_coords)
-        distances, indices = nbrs.kneighbors(pca_coords)
-        
-        batch_mixing_scores = []
-        for i in range(len(pca_coords)):
-            neighbor_indices = indices[i, 1:]  # 排除自身
-            neighbor_batches = batch_labels[neighbor_indices]
-            
-            # 邻居中不同批次的比例
-            unique_batches = np.unique(neighbor_batches)
-            mixing_score = len(unique_batches) / len(np.unique(batch_labels))
-            batch_mixing_scores.append(mixing_score)
-        
-        return np.array(batch_mixing_scores)
-    
-    # 使用前30个PC
-    pca_coords = adata.obsm['X_pca'][:, :30]
-    batch_labels = adata.obs['sample'].values
-    
-    batch_mixing_scores = calculate_batch_mixing(pca_coords, batch_labels, k=50)
-    adata.obs['batch_mixing_score'] = batch_mixing_scores
-    
-    print(f"平均批次混合分数: {batch_mixing_scores.mean():.3f}")
-    print(f"批次混合分数范围: [{batch_mixing_scores.min():.3f}, {batch_mixing_scores.max():.3f}]")
-    
-    # 可视化批次混合
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # 批次混合分数分布
-    axes[0].hist(batch_mixing_scores, bins=30, alpha=0.7, color='skyblue')
-    axes[0].axvline(x=batch_mixing_scores.mean(), color='red', linestyle='--', 
-                   label=f'均值={batch_mixing_scores.mean():.3f}')
-    axes[0].set_xlabel('批次混合分数')
-    axes[0].set_ylabel('细胞数')
-    axes[0].set_title('批次混合分数分布')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # 各样本的批次混合
-    sample_mixing = []
-    for sample in samples:
-        sample_mask = adata.obs['sample'] == sample
-        sample_mean = batch_mixing_scores[sample_mask].mean()
-        sample_mixing.append(sample_mean)
-    
-    axes[1].bar(range(len(samples)), sample_mixing, 
-               color=sns.color_palette("Set2", len(samples)))
-    axes[1].set_xlabel('样本')
-    axes[1].set_ylabel('平均批次混合分数')
-    axes[1].set_title('各样本批次混合程度')
-    axes[1].set_xticks(range(len(samples)))
-    axes[1].set_xticklabels(samples)
-    
-    for i, v in enumerate(sample_mixing):
-        axes[1].text(i, v, f'{v:.3f}', ha='center', va='bottom')
-    
-    plt.tight_layout()
-    plt.savefig('batch_mixing_analysis.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✅ 批次混合分析图: batch_mixing_analysis.png")
-    
-else:
-    print("只有一个样本，跳过批次效应评估")
-
-# ======== 步骤4：批次校正（可选） ========
-print("\n" + "="*60)
-print("步骤4: 批次校正（如果有多批次）")
-print("="*60)
-
-if 'sample' in adata.obs.columns and len(samples) > 1:
-    print(f"检测到 {len(samples)} 个样本，进行批次校正...")
-    
-    if batch_mixing_scores.mean() < 0.3:
-        print("⚠️ 批次混合分数低，建议进行批次校正")
-        
-        # 方法选择
-        if HARMONY_AVAILABLE:
-            print("使用Harmony进行批次校正...")
-            
-            # 准备数据
-            pca_coords = adata.obsm['X_pca'][:, :pc_80]  # 使用达到80%方差的PC
-            batch_info = adata.obs[['sample']]
-            
-            # 运行Harmony
-            ho = harmonypy.run_harmony(
-                pca_coords, 
-                batch_info, 
-                'sample',
-                max_iter_harmony=20,
-                verbose=False
-            )
-            
-            # 获取校正后的坐标
-            corrected_coords = ho.Z_corr.T
-            
-            # 添加到adata
-            adata.obsm['X_pca_harmony'] = np.zeros((adata.n_obs, 50))
-            adata.obsm['X_pca_harmony'][:, :corrected_coords.shape[1]] = corrected_coords
-            
-            print("✅ Harmony批次校正完成")
-            
-            # 可视化校正效果
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-            
-            # 校正前
-            sc.pl.pca(adata, color='sample', ax=axes[0], show=False, legend_loc='on data')
-            axes[0].set_title('校正前')
-            
-            # 校正后（临时替换PCA坐标）
-            temp_pca = adata.obsm['X_pca'].copy()
-            adata.obsm['X_pca'] = adata.obsm['X_pca_harmony']
-            sc.pl.pca(adata, color='sample', ax=axes[1], show=False, legend_loc='on data')
-            axes[1].set_title('Harmony校正后')
-            adata.obsm['X_pca'] = temp_pca  # 恢复原始坐标
-            
-            plt.suptitle('Harmony批次校正效果', fontsize=14, y=1.02)
-            plt.tight_layout()
-            plt.savefig('harmony_correction.png', dpi=150, bbox_inches='tight')
-            plt.close()
-            print("✅ Harmony校正效果图: harmony_correction.png")
-            
-            # 使用校正后的坐标进行后续分析
-            use_harmony = True
-        else:
-            print("Harmony不可用，使用scanpy的整合方法...")
-            use_harmony = False
-    else:
-        print("批次混合良好，跳过批次校正")
-        use_harmony = False
-else:
-    print("只有一个样本，跳过批次校正")
-    use_harmony = False
-
-# ======== 步骤5：构建邻居图和UMAP ========
-print("\n" + "="*60)
-print("步骤5: 构建邻居图和UMAP降维")
-print("="*60)
-
-# 选择使用的PCA坐标
-if use_harmony and 'X_pca_harmony' in adata.obsm:
-    print("使用Harmony校正后的PCA坐标...")
-    # 临时替换PCA坐标
-    original_pca = adata.obsm['X_pca'].copy()
-    adata.obsm['X_pca'] = adata.obsm['X_pca_harmony']
-else:
-    print("使用原始PCA坐标...")
-
-# 5.1 构建邻居图
-print("\n5.1 构建邻居图...")
-# 使用达到80%方差的PC数
-n_pcs = min(pc_80, 50)
-print(f"使用前 {n_pcs} 个PC构建邻居图")
-
-sc.pp.neighbors(
-    adata,
-    n_neighbors=15,      # 邻居数
-    n_pcs=n_pcs,         # 使用的PC数
-    metric='euclidean',  # 距离度量
-    random_state=42
-)
-print("✅ 邻居图构建完成")
-
-# 5.2 UMAP降维
-print("\n5.2 UMAP降维...")
-sc.tl.umap(adata, random_state=42)
-print("✅ UMAP计算完成")
-
-# 恢复原始PCA坐标（如果使用了Harmony）
-if use_harmony and 'original_pca' in locals():
-    adata.obsm['X_pca'] = original_pca
-
-# ======== 步骤6：聚类分析 ========
-print("\n" + "="*60)
-print("步骤6: 聚类分析")
-print("="*60)
-
-# 6.1 Leiden聚类
-print("6.1 Leiden聚类...")
-# 尝试不同的分辨率
-resolutions = [0.1, 0.2, 0.4, 0.8, 1.0, 0.05, 0.02, 0.01]  # 添加更小的分辨率
-best_resolution = 0.1
-best_n_clusters = 0
-all_results = []
-
-for res in resolutions:
-    print(f"  测试分辨率: {res}")
-    sc.tl.leiden(adata, resolution=res, random_state=42)
-    n_clusters = len(adata.obs['leiden'].unique())
-    print(f"    聚类数: {n_clusters}")
-    all_results.append((res, n_clusters))
-    
-    # 寻找最接近10-20个聚类的分辨率
-    if 10 <= n_clusters <= 20:
-        if best_n_clusters == 0 or abs(n_clusters - 15) < abs(best_n_clusters - 15):
-            best_resolution = res
-            best_n_clusters = n_clusters
-
-# 如果没有找到10-20的聚类，选择最接近的
-if best_n_clusters == 0:
-    print("未找到10-20个聚类，选择最接近的分辨率...")
-    # 找到聚类数最少的结果
-    all_results.sort(key=lambda x: x[1])  # 按聚类数排序
-    for res, n_clusters in all_results:
-        if n_clusters >= 5:  # 至少5个聚类
-            best_resolution = res
-            best_n_clusters = n_clusters
-            break
-
-print(f"\n选择分辨率: {best_resolution}, 得到 {best_n_clusters} 个聚类")
-sc.tl.leiden(adata, resolution=best_resolution, key_added='cluster', random_state=42)
-print(f"最终聚类数: {len(adata.obs['cluster'].unique())}")
-
-# 6.2 计算聚类标记基因
-print("\n6.2 计算聚类标记基因...")
-sc.tl.rank_genes_groups(
-    adata, 
-    'cluster', 
-    method='wilcoxon',
-    key_added='rank_genes_cluster'
-)
-print("✅ 标记基因计算完成")
-
-# ======== 步骤7：可视化 ========
-print("\n" + "="*60)
-print("步骤7: 可视化分析")
-print("="*60)
-
-print("生成可视化图形...")
-
-# 7.1 UMAP可视化
-fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-
-# 按聚类着色
-sc.pl.umap(adata, color=['cluster'], ax=axes[0, 0], show=False, legend_loc='on data')
-axes[0, 0].set_title('UMAP - 聚类结果')
-
-# 按样本着色
-if 'sample' in adata.obs.columns:
-    sc.pl.umap(adata, color=['sample'], ax=axes[0, 1], show=False, legend_loc='on data')
-    axes[0, 1].set_title('UMAP - 样本分布')
-    
-    # 检查"批次驱动的分裂"
-    # 计算每个聚类中各样本的比例
-    cluster_sample_dist = pd.crosstab(adata.obs['cluster'], adata.obs['sample'])
-    cluster_sample_percent = cluster_sample_dist.div(cluster_sample_dist.sum(axis=1), axis=0) * 100
-    
-    # 找出被单一样本"垄断"的聚类（>80%来自同一样本）
-    monopolized_clusters = []
-    for cluster in cluster_sample_percent.index:
-        max_percent = cluster_sample_percent.loc[cluster].max()
-        if max_percent > 80:
-            monopolized_clusters.append(cluster)
-    
-    if monopolized_clusters:
-        print(f"⚠️ 发现 {len(monopolized_clusters)} 个可能被单一样本垄断的聚类: {monopolized_clusters}")
-else:
-    axes[0, 1].text(0.5, 0.5, '无样本信息', ha='center', va='center')
-
-# 按QC指标着色
-if 'n_genes_by_counts' in adata.obs.columns:
-    sc.pl.umap(adata, color=['n_genes_by_counts'], ax=axes[0, 2], show=False, cmap='viridis')
-    axes[0, 2].set_title('UMAP - 基因数')
-elif 'total_counts' in adata.obs.columns:
-    sc.pl.umap(adata, color=['total_counts'], ax=axes[0, 2], show=False, cmap='viridis')
-    axes[0, 2].set_title('UMAP - UMI数')
-
-# 标记基因热图
-if 'rank_genes_cluster' in adata.uns:
-    # 提取每个聚类的前5个标记基因
-    top_genes = []
-    for cluster in adata.obs['cluster'].unique():
-        try:
-            # 注意：cluster可能是字符串类型
-            cluster_genes = adata.uns['rank_genes_cluster']['names'][str(cluster)][:5]
-            top_genes.extend(cluster_genes)
-        except (KeyError, TypeError):
-            # 如果找不到这个聚类的标记基因，跳过
-            continue
-    
-    # 去重
-    top_genes = list(dict.fromkeys(top_genes))
-    
-    if len(top_genes) > 0:
-        # 方法1：使用scanpy的heatmap但手动设置ax
-        try:
-            # 先清空axes
-            axes[1, 0].clear()
-            
-            # 使用scanpy的heatmap，但不传递ax参数
-            sc.pl.heatmap(
-                adata,
-                var_names=top_genes[:20],  # 最多显示20个基因
-                groupby='cluster',
-                show=False,
-                cmap='RdBu_r',
-                swap_axes=True
-            )
-            
-            # 手动将图形保存到指定axes
-            fig = plt.gcf()
-            ax = fig.axes[0]
-            ax.figure = axes[1, 0].figure
-            axes[1, 0].figure.axes.append(ax)
-            
-        except Exception as e:
-            print(f"热图绘制失败: {e}")
-            # 方法2：手动绘制热图
-            try:
-                # 准备数据
-                from scipy import sparse
-                
-                # 获取表达矩阵
-                gene_indices = [list(adata.var_names).index(gene) for gene in top_genes[:20] if gene in adata.var_names]
-                if gene_indices:
-                    # 提取基因表达数据
-                    expr_data = adata[:, gene_indices].X
-                    if sparse.issparse(expr_data):
-                        expr_data = expr_data.toarray()
-                    
-                    # 按聚类排序
-                    cluster_order = sorted(adata.obs['cluster'].unique())
-                    cluster_indices = []
-                    for cluster in cluster_order:
-                        cluster_mask = adata.obs['cluster'] == cluster
-                        cluster_indices.extend(np.where(cluster_mask)[0])
-                    
-                    expr_data_sorted = expr_data[cluster_indices, :]
-                    
-                    # 绘制热图
-                    im = axes[1, 0].imshow(expr_data_sorted.T, aspect='auto', cmap='RdBu_r')
-                    axes[1, 0].set_xlabel('细胞（按聚类排序）')
-                    axes[1, 0].set_ylabel('基因')
-                    axes[1, 0].set_title('聚类标记基因热图')
-                    
-                    # 添加颜色条
-                    plt.colorbar(im, ax=axes[1, 0])
-                    
-            except Exception as e2:
-                print(f"手动热图也失败: {e2}")
-                axes[1, 0].text(0.5, 0.5, '热图绘制失败', ha='center', va='center')
-    else:
-        axes[1, 0].text(0.5, 0.5, '无标记基因数据', ha='center', va='center')
-else:
-    axes[1, 0].text(0.5, 0.5, '无标记基因数据', ha='center', va='center')
-
-axes[1, 0].set_title('聚类标记基因热图')
-
-# 聚类大小饼图
-cluster_sizes = adata.obs['cluster'].value_counts()
-axes[1, 1].pie(cluster_sizes.values, labels=cluster_sizes.index, 
-              autopct='%1.1f%%', startangle=90)
-axes[1, 1].axis('equal')
-axes[1, 1].set_title('聚类细胞数分布')
-
-# 样本在聚类中的分布
-if 'sample' in adata.obs.columns:
-    # 堆叠柱状图
-    cluster_sample_dist.plot(kind='bar', stacked=True, ax=axes[1, 2], 
-                           colormap='Set2')
-    axes[1, 2].set_xlabel('聚类')
-    axes[1, 2].set_ylabel('细胞数')
-    axes[1, 2].set_title('各聚类中样本分布')
-    axes[1, 2].legend(title='样本', bbox_to_anchor=(1.05, 1), loc='upper left')
-    axes[1, 2].tick_params(axis='x', rotation=45)
-else:
-    axes[1, 2].text(0.5, 0.5, '无样本信息', ha='center', va='center')
-
-plt.suptitle('单细胞聚类分析可视化', fontsize=16, y=1.02)
-plt.tight_layout()
-plt.savefig('clustering_visualization.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ 聚类可视化图: clustering_visualization.png")
-
-# 7.2 标记基因点图
-print("\n生成标记基因点图...")
-if 'rank_genes_cluster' in adata.uns and best_n_clusters > 0:
-    # 选择每个聚类的前3个标记基因
-    dotplot_genes = []
-    for cluster in np.sort(adata.obs['cluster'].unique().astype(int)):
-        cluster_genes = adata.uns['rank_genes_cluster']['names'][str(cluster)][:3]
-        dotplot_genes.extend(cluster_genes)
-    
-    dotplot_genes = list(dict.fromkeys(dotplot_genes))
-    
-    if len(dotplot_genes) > 0:
-        fig, ax = plt.subplots(figsize=(max(8, best_n_clusters*2), 8))
-        sc.pl.dotplot(
-            adata, 
-            var_names=dotplot_genes[:20],  # 最多20个基因
-            groupby='cluster',
-            ax=ax,
-            show=False,
-            cmap='RdBu_r',
-            standard_scale='var'
-        )
-        plt.tight_layout()
-        plt.savefig('marker_genes_dotplot.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        print("✅ 标记基因点图: marker_genes_dotplot.png")
-
-# 7.3 样本特异性分析
-if 'sample' in adata.obs.columns and len(samples) > 1:
-    print("\n生成样本特异性分析图...")
-    
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # 各样本的聚类分布
-    sample_cluster_dist = pd.crosstab(adata.obs['sample'], adata.obs['cluster'])
-    sample_cluster_percent = sample_cluster_dist.div(sample_cluster_dist.sum(axis=1), axis=0) * 100
-    
-    sample_cluster_percent.plot(kind='bar', stacked=True, ax=axes[0], 
-                               colormap='tab20c')
-    axes[0].set_xlabel('样本')
-    axes[0].set_ylabel('百分比')
-    axes[0].set_title('各样本的聚类组成')
-    axes[0].legend(title='聚类', bbox_to_anchor=(1.05, 1), loc='upper left')
-    axes[0].tick_params(axis='x', rotation=45)
-    
-    # 样本间差异热图
-    axes[1].imshow(sample_cluster_percent.T, aspect='auto', cmap='YlOrRd')
-    axes[1].set_xlabel('样本')
-    axes[1].set_ylabel('聚类')
-    axes[1].set_title('样本-聚类组成热图')
-    axes[1].set_xticks(range(len(samples)))
-    axes[1].set_xticklabels(samples, rotation=45)
-    axes[1].set_yticks(range(best_n_clusters))
-    axes[1].set_yticklabels([f'C{i}' for i in range(best_n_clusters)])
-    plt.colorbar(axes[1].imshow(sample_cluster_percent.T, aspect='auto', cmap='YlOrRd'), 
-                 ax=axes[1], label='百分比')
-    
-    plt.tight_layout()
-    plt.savefig('sample_specific_analysis.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✅ 样本特异性分析图: sample_specific_analysis.png")
-
-# ======== 步骤8：保存结果 ========
-print("\n" + "="*60)
-print("步骤8: 保存结果")
-print("="*60)
-
-# 保存分析结果
-adata.write('adata_integrated_clustered.h5ad')
-print("✅ 保存整合聚类数据: adata_integrated_clustered.h5ad")
-
-# 保存聚类结果
-adata.obs[['cluster']].to_csv('cell_clusters.csv')
-print("✅ 保存细胞聚类标签: cell_clusters.csv")
-
-# 保存标记基因
-if 'rank_genes_cluster' in adata.uns:
-    marker_genes = pd.DataFrame()
-    for cluster in adata.obs['cluster'].unique():
-        cluster_df = pd.DataFrame({
-            'gene': adata.uns['rank_genes_cluster']['names'][cluster],
-            'logfoldchanges': adata.uns['rank_genes_cluster']['logfoldchanges'][cluster],
-            'pvals': adata.uns['rank_genes_cluster']['pvals'][cluster],
-            'pvals_adj': adata.uns['rank_genes_cluster']['pvals_adj'][cluster],
-            'cluster': cluster
-        })
-        marker_genes = pd.concat([marker_genes, cluster_df])
-    
-    marker_genes.to_csv('cluster_marker_genes.csv', index=False)
-    print("✅ 保存聚类标记基因: cluster_marker_genes.csv")
-
-# 保存UMAP坐标
-umap_coords = pd.DataFrame(
-    adata.obsm['X_umap'],
-    columns=['UMAP1', 'UMAP2'],
-    index=adata.obs_names
-)
-umap_coords.to_csv('umap_coordinates.csv')
-print("✅ 保存UMAP坐标: umap_coordinates.csv")
-
-# 生成分析报告
-with open('integration_clustering_report.txt', 'w') as f:
-    f.write("="*60 + "\n")
-    f.write("单细胞整合、降维、聚类分析报告\n")
-    f.write("="*60 + "\n\n")
-    
-    f.write("1. 输入数据:\n")
-    f.write(f"   输入文件: adata_hv_scaled.h5ad\n")
-    f.write(f"   细胞数: {adata.n_obs}\n")
-    f.write(f"   高变基因数: {adata.n_vars}\n")
-    
-    if 'sample' in adata.obs.columns:
-        f.write(f"   样本数: {len(samples)}\n")
-        f.write(f"   样本: {list(samples)}\n\n")
-    
-    f.write("2. PCA降维:\n")
-    f.write(f"   主成分数: 50\n")
-    f.write(f"   达到80%方差: PC{pc_80}\n")
-    f.write(f"   达到90%方差: PC{pc_90}\n\n")
-    
-    if 'sample' in adata.obs.columns and len(samples) > 1:
-        f.write("3. 批次效应评估:\n")
-        f.write(f"   平均批次混合分数: {batch_mixing_scores.mean():.3f}\n")
-        
-        if use_harmony:
-            f.write(f"   批次校正: Harmony (已应用)\n")
-        else:
-            f.write(f"   批次校正: 未应用\n")
-        
-        if monopolized_clusters:
-            f.write(f"   ⚠️ 发现可能被单一样本垄断的聚类: {monopolized_clusters}\n")
-        f.write("\n")
-    
-    f.write("4. 聚类分析:\n")
-    f.write(f"   聚类方法: Leiden\n")
-    f.write(f"   分辨率: {best_resolution}\n")
-    f.write(f"   聚类数: {best_n_clusters}\n")
-    f.write(f"   聚类大小: {dict(adata.obs['cluster'].value_counts())}\n\n")
-    
-    f.write("5. 输出文件:\n")
-    f.write(f"   1. adata_integrated_clustered.h5ad - 完整分析数据\n")
-    f.write(f"   2. cell_clusters.csv - 细胞聚类标签\n")
-    f.write(f"   3. cluster_marker_genes.csv - 聚类标记基因\n")
-    f.write(f"   4. umap_coordinates.csv - UMAP坐标\n")
-    f.write(f"   5. pca_scree_plot.png - PCA碎石图\n")
-    f.write(f"   6. clustering_visualization.png - 聚类可视化\n")
-    f.write(f"   7. marker_genes_dotplot.png - 标记基因点图\n")
-    
-    if 'sample' in adata.obs.columns and len(samples) > 1:
-        f.write(f"   8. batch_effect_pca.png - 批次效应评估\n")
-        f.write(f"   9. batch_mixing_analysis.png - 批次混合分析\n")
-        f.write(f"   10. sample_specific_analysis.png - 样本特异性分析\n")
-        if use_harmony:
-            f.write(f"   11. harmony_correction.png - Harmony校正效果\n")
-
-print("✅ 分析报告: integration_clustering_report.txt")
-
-# 生成tSNE图
-# 检查是否已有tSNE坐标，如果没有则计算
-if 'X_tsne' not in adata.obsm_keys():
-    print("计算tSNE...")
-    sc.tl.tsne(adata, random_state=42)
-    print("✅ tSNE计算完成")
-else:
-    print("已有tSNE坐标")
-
-# 创建tSNE分群图
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 忽略警告
-import warnings
-warnings.filterwarnings('ignore', message='No data for colormapping provided via.*')
-
-# 在tSNE空间查看聚类结果
-if 'cluster' in adata.obs.columns:
-    sc.pl.tsne(adata, color='cluster', ax=axes[0], show=False, legend_loc='on data')
-    axes[0].set_title('t-SNE - Clustering Distribution')
-else:
-    axes[0].text(0.5, 0.5, 'No cluster information', ha='center', va='center')
-    axes[0].set_title('t-SNE - Clustering Distribution')
-
-# 在tSNE空间查看样本分布
-if 'sample' in adata.obs.columns:
-    sc.pl.tsne(adata, color='sample', ax=axes[1], show=False, legend_loc='on data')
-    axes[1].set_title('t-SNE - Sample Distribution')
-else:
-    axes[1].text(0.5, 0.5, 'No sample information', ha='center', va='center')
-    axes[1].set_title('t-SNE - Sample Distribution')
-
-plt.suptitle('Cell Distribution in t-SNE Space', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('tsne_clustering_distribution.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ tSNE分群图: tsne_clustering_distribution.png")
-##############################################################################
-
-##############################################################################
-# PCA可视化
-import matplotlib.pyplot as plt
-import scanpy as sc
-import numpy as np
-adata = sc.read('adata_integrated_clustered.h5ad')
-# ======== 补充PCA分群可视化 ========
-import matplotlib.pyplot as plt
-import scanpy as sc
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore', message='No data for colormapping provided via.*')
-
-# 加载你当前的数据
-adata = sc.read('adata_integrated_clustered.h5ad')  # 或你当前的数据文件
-
-# 1. PCA分群图
-
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-# 在PCA空间查看聚类结果
-if 'cluster' in adata.obs.columns:
-    sc.pl.pca(adata, color='cluster', ax=axes[0], show=False, legend_loc='on data')
-    axes[0].set_title('PCA - Clustering Distribution')
-else:
-    axes[0].text(0.5, 0.5, 'No cluster information', ha='center', va='center')
-    axes[0].set_title('PCA - Clustering Distribution')
-
-# 在PCA空间查看样本分布
-if 'sample' in adata.obs.columns:
-    sc.pl.pca(adata, color=['sample'], ax=axes[1], show=False, legend_loc='on data')
-    axes[1].set_title('PCA - Sample Distribution')
-else:
-    axes[1].text(0.5, 0.5, 'no information of sample', ha='center', va='center')
-    axes[1].set_title('PCA - Sample Distribution')
-
-plt.suptitle('Cell Distribution in PCA Space', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('pca_clustering_distribution.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("✅ PCA分群图: pca_clustering_distribution.png")
-
-# 2. 检查PCA中的批次效应
-if 'sample' in adata.obs.columns and len(adata.obs['sample'].unique()) > 1:
-    print("\n检查PCA中的批次效应...")
-    
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    # PC1 vs PC2
-    sc.pl.pca(adata, color='sample', ax=axes[0], show=False, legend_loc='on data')
-    axes[0].set_title('PC1 vs PC2')
-    
-    # PC3 vs PC4
-    sc.pl.pca(adata, color='sample', components=['3,4'], ax=axes[1], show=False, legend_loc='on data')
-    axes[1].set_title('PC3 vs PC4')
-    
-    # PC5 vs PC6
-    sc.pl.pca(adata, color='sample', components=['5,6'], ax=axes[2], show=False, legend_loc='on data')
-    axes[2].set_title('PC5 vs PC6')
-    
-    plt.suptitle('Batch Effect Examination Across Different PCA Principal Components', fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.savefig('pca_batch_effect_check.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✅ PCA批次效应检查图: pca_batch_effect_check.png")
-##############################################################################
-
-##############################################################################
-# ======== 初步UMAP检查========
-print("\n生成初步UMAP检查图...")
-
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-# 按聚类着色
-sc.pl.umap(adata, color=['cluster'], ax=axes[0], show=False, legend_loc='on data')
-axes[0].set_title('UMAP - Result of cluster')
-
-# 按样本着色
-if 'sample' in adata.obs.columns:
-    sc.pl.umap(adata, color=['sample'], ax=axes[1], show=False, legend_loc='on data')
-    axes[1].set_title('UMAP - Distrbution of cluster')
-    
-    # 检查"样本驱动的分裂"
-    print("\n检查'样本驱动的分裂'...")
-    
-    # 计算每个聚类中各样本的比例
-    from scipy.stats import entropy
-    
-    cluster_sample_dist = pd.crosstab(adata.obs['cluster'], adata.obs['sample'])
-    cluster_sample_percent = cluster_sample_dist.div(cluster_sample_dist.sum(axis=1), axis=0) * 100
-    
-    # 计算每个聚类的样本混合度（熵）
-    sample_mixing_scores = []
-    for cluster in cluster_sample_percent.index:
-        proportions = cluster_sample_percent.loc[cluster].values / 100
-        proportions = proportions[proportions > 0]  # 移除0值
-        cluster_entropy = entropy(proportions)
-        max_entropy = np.log(len(proportions)) if len(proportions) > 1 else 0
-        normalized_entropy = cluster_entropy / max_entropy if max_entropy > 0 else 0
-        sample_mixing_scores.append(normalized_entropy)
-    
-    adata.obs['sample_mixing_score'] = 0
-    for i, cluster in enumerate(cluster_sample_percent.index):
-        cluster_mask = adata.obs['cluster'] == cluster
-        adata.obs.loc[cluster_mask, 'sample_mixing_score'] = sample_mixing_scores[i]
-    
-    # 在UMAP上显示样本混合度
-    sc.pl.umap(adata, color=['sample_mixing_score'], ax=axes[2], show=False, cmap='viridis')
-    axes[2].set_title('UMAP - Sample Mixing Degree')
-    
-    # 识别可能被单一样本垄断的聚类
-    monopolized_clusters = []
-    for cluster in cluster_sample_percent.index:
-        max_percent = cluster_sample_percent.loc[cluster].max()
-        if max_percent > 80:  # 超过80%来自同一样本
-            monopolized_clusters.append(cluster)
-    
-    if monopolized_clusters:
-        print(f"⚠️ 发现 {len(monopolized_clusters)} 个可能被单一样本垄断的聚类:")
-        for cluster in monopolized_clusters:
-            dominant_sample = cluster_sample_percent.loc[cluster].idxmax()
-            dominant_percent = cluster_sample_percent.loc[cluster].max()
-            print(f"  聚类 {cluster}: {dominant_sample} 占 {dominant_percent:.1f}%")
-    else:
-        print("✅ 未发现明显被单一样本垄断的聚类")
-    
-else:
-    axes[1].text(0.5, 0.5, '无样本信息', ha='center', va='center')
-    axes[1].set_title('UMAP - Distrbution of cluster')
-    axes[2].text(0.5, 0.5, '无样本信息', ha='center', va='center')
-    axes[2].set_title('UMAP - Sample Mixing Degree')
-
-plt.suptitle('初步UMAP检查 - 快速识别样本驱动的分裂', fontsize=14, y=1.02)
-plt.tight_layout()
-plt.savefig('preliminary_UMAP_check.png', dpi=300, bbox_inches='tight')
-plt.close()
-print("✅ 初步UMAP检查图已保存")
-##############################################################################
-
-##############################################################################
-# ======== 细胞类型注释 ========
-print("\n" + "="*60)
-print("细胞类型注释（一级注释）")
-print("="*60)
-
-# 定义小鼠心脏组织的主要细胞类型marker基因
-marker_genes = {
-    'Cardiomyocytes': ['Tnnt2', 'Myh6', 'Myh7', 'Actc1', 'Ryr2'],  # 心肌细胞
-    'Fibroblasts': ['Col1a1', 'Col1a2', 'Col3a1', 'Dcn', 'Lum', 'Pdgfra'],  # 成纤维细胞
-    'Endothelial': ['Pecam1', 'Cdh5', 'Vwf', 'Eng', 'Kdr'],  # 内皮细胞
-    'Smooth Muscle': ['Acta2', 'Myh11', 'Tagln', 'Cnn1'],  # 平滑肌细胞
-    'Macrophages': ['Cd68', 'Adgre1', 'C1qa', 'C1qb', 'C1qc'],  # 巨噬细胞
-    'Monocytes': ['Ly6c2', 'Ccr2', 'Cx3cr1'],  # 单核细胞
-    'T cells': ['Cd3d', 'Cd3e', 'Cd3g', 'Cd8a', 'Cd4'],  # T细胞
-    'B cells': ['Cd79a', 'Ms4a1', 'Cd19'],  # B细胞
-    'NK cells': ['Nkg7', 'Klrb1c', 'Klrd1'],  # NK细胞
-    'Neutrophils': ['S100a8', 'S100a9', 'Cxcr2'],  # 中性粒细胞
-    'Mast cells': ['Cpa3', 'Mcpt4', 'Kit'],  # 肥大细胞
-    'Erythrocytes': ['Hba-a1', 'Hbb-bs', 'Hbb-bt'],  # 红细胞
-    'Proliferating': ['Mki67', 'Pcna', 'Top2a']  # 增殖细胞
+# ============================================================================
+# 糖尿病心肌病（DCM）分组样本分析 - 完整R流程
+# Ctrl组（4个样本）vs DM组（4个样本）
+# ============================================================================
+
+# ============================================================================
+# 创建conda环境，后续自行安装R包和R包支持
+# ============================================================================
+conda create -n r_4.3.3 -c conda-forge \
+    r-base=4.3.3 \
+    r-essentials \
+    r-devtools \
+    r-remotes \
+    gxx_linux-64 \
+    make \
+    cmake \
+    -y
+
+conda activate r_4.3.3
+# ============================================================================
+# 设置R能使用的内存量，防止内存不足
+# ============================================================================
+export R_MAX_VSIZE=200Gb
+
+# 设置 R 可加载的动态链接库（DLL）最大数量
+export R_MAX_NUM_DLLS=200
+
+# 设置 OpenBLAS 或 MKL 等线性代数库使用单线程，避免内存竞争
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export OPENBLAS_MAX_THREADS=1
+export OPENBLAS_NUM_REGISTERS_ALLOC=1000
+export OPENBLAS_MAX_REGIONS=2000
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export NUMEXPR_MAX_THREADS=1
+# ============================================================================
+# 0. 设置工作环境和加载包
+# ============================================================================
+cat("=== 设置工作环境和加载包 ===\n")
+
+# 检查并安装必要的包
+library(Seurat)
+library(sctransform)
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+library(harmony)
+library(sctransform)
+library(Matrix)
+library(future)
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+library(cowplot)
+library(rstatix)
+library(celldex)
+library(SingleR)
+library(glmGamPoi)
+
+# 设置并行计算
+options(future.seed = 1234L)
+plan("multisession", workers = 6)
+options(future.globals.maxSize = 30 * 1024^3)  # 这个地方要看设备能不能使用超过32G的内存
+
+# 设置随机种子
+set.seed(1234)
+
+# 创建输出目录
+dirs <- c("figures", "tables", "objects", "reports", "qc", "batch_correction", "results")
+for (dir in dirs) {
+  if (!dir.exists(dir)) dir.create(dir, recursive = TRUE)
 }
 
-# 检查哪些marker基因在你的数据中存在
-print("检查marker基因在数据中的存在情况...")
-available_markers = {}
-for cell_type, genes in marker_genes.items():
-    available_genes = [gene for gene in genes if gene in adata.var_names]
-    if available_genes:
-        available_markers[cell_type] = available_genes
-        print(f"  {cell_type}: {len(available_genes)}/{len(genes)} 个基因存在")
-    else:
-        print(f"  ⚠️ {cell_type}: 无可用marker基因")
+cat("✓ 环境设置完成\n")
 
-# 绘制marker基因点图
-print("\n生成marker基因点图...")
+# ============================================================================
+# 1. 数据加载和组织结构
+# ============================================================================
+cat("\n=== 1. 数据加载和组织结构 ===\n")
 
-# 选择每个细胞类型的前3个可用基因用于点图
-dotplot_genes = []
-for cell_type, genes in available_markers.items():
-    dotplot_genes.extend(genes[:3])
+# 1.1 定义样本信息
+# 请根据实际情况修改样本信息
+sample_info <- data.frame(
+  sample_id = c("SRR21566212", "SRR21566213", "SRR21566214", "SRR21566215", "SRR21566208", "SRR21566209", "SRR21566210", "SRR21566211"),
+  group = c(rep("Ctrl", 4), rep("DM", 4)),
+  batch = c(1, 1, 1, 1, 1, 1, 1, 1),
+  data_path = c(
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/ctrl/SRR21566212_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/ctrl/SRR21566213_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/ctrl/SRR21566214_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/ctrl/SRR21566215_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/dm/SRR21566208_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/dm/SRR21566209_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/dm/SRR21566210_out/outs/filtered_feature_bc_matrix",
+    "/home/mengziyu/working/scrna-seq/01.scrna_qc_and_filter/dm/SRR21566211_out/outs/filtered_feature_bc_matrix"
+  )
+)
 
-if dotplot_genes:
-    fig, ax = plt.subplots(figsize=(12, 8))
-    sc.pl.dotplot(
-        adata,
-        var_names=dotplot_genes,
-        groupby='cluster',
-        ax=ax,
-        show=False,
-        cmap='RdBu_r',
-        standard_scale='var',
-        dendrogram=True
+# 加载单个样本的函数
+load_single_sample <- function(sample_id, data_path, group) {
+  cat(paste("  加载样本:", sample_id, "\n"))  
+  # 使用Read10X读取10X数据
+  data <- Read10X(data.dir = data_path)
+  seurat_obj <- CreateSeuratObject(counts = data, project = sample_id, min.cells = 3, min.features = 200)  
+  # 添加样本信息
+  seurat_obj$sample_id <- sample_id
+  seurat_obj$group <- group
+  seurat_obj$batch <- sample_info$batch[sample_info$sample_id == sample_id]  
+  return(seurat_obj)
+}
+
+# 加载所有样本
+cat("加载所有8个样本...\n")
+seurat_list <- list()
+
+for (i in 1:nrow(sample_info)) {
+  sample_row <- sample_info[i, ]
+  seurat_obj <- load_single_sample(sample_id = sample_row$sample_id, data_path = sample_row$data_path, group = sample_row$group)
+  seurat_list[[sample_row$sample_id]] <- seurat_obj
+}
+
+# 显示每个样本的基本信息
+cat("\n=== 样本基本信息 ===\n")
+sample_stats <- data.frame()
+
+for (sample_name in names(seurat_list)) {
+  obj <- seurat_list[[sample_name]]
+  stats <- data.frame(Sample = sample_name, Group = unique(obj$group), Batch = unique(obj$batch), nCells = ncol(obj), nGenes = nrow(obj), Mean_Genes = mean(obj$nFeature_RNA), Mean_UMIs = mean(obj$nCount_RNA))
+  sample_stats <- rbind(sample_stats, stats)
+  cat(paste("样本:", sample_name, 
+            "| 组别:", unique(obj$group),
+            "| 细胞数:", ncol(obj),
+            "| 基因数:", nrow(obj), "\n"))
+}
+
+write.csv(sample_stats, "tables/sample_statistics.csv", row.names = FALSE)
+# 及时释放内存和R对象
+gc()
+rm()
+# ============================================================================
+# 2. 样本质控
+# ============================================================================
+cat("\n=== 2. 样本质控 ===\n")
+
+# 2.1 为每个样本计算质控指标
+cat("计算每个样本的质控指标...\n")
+
+for (sample_name in names(seurat_list)) {
+  cat(paste("  处理样本:", sample_name, "\n"))
+  obj <- seurat_list[[sample_name]]
+  
+  # 计算线粒体基因比例
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
+  obj[["percent.rb"]] <- PercentageFeatureSet(obj, pattern = "^RP[SL]")
+  obj[["percent.hb"]] <- PercentageFeatureSet(obj, pattern = "^HB[^(P)]")
+  
+  seurat_list[[sample_name]] <- obj
+}
+
+# 2.2 绘制质控图
+cat("绘制样本质控图...\n")
+
+# 收集所有样本的质控数据
+qc_data_all <- data.frame()
+
+for (sample_name in names(seurat_list)) {
+  obj <- seurat_list[[sample_name]]
+  qc_data <- data.frame(
+    Sample = sample_name,
+    Group = obj$group[1],
+    nFeature_RNA = obj$nFeature_RNA,
+    nCount_RNA = obj$nCount_RNA,
+    percent.mt = obj$percent.mt
+  )
+  qc_data_all <- rbind(qc_data_all, qc_data)
+}
+# 结果显示Warning massages时问题不大
+# 如下备选
+# =====
+for (sample_name in names(seurat_list)) {
+  obj <- seurat_list[[sample_name]]
+  n_cells <- length(obj$nFeature_RNA)  # 或者 ncol(obj)
+  qc_data <- data.frame(
+    Sample = rep(sample_name, n_cells),
+    Group = rep(obj$group[1], n_cells),
+    nFeature_RNA = obj$nFeature_RNA,
+    nCount_RNA = obj$nCount_RNA,
+    percent.mt = obj$percent.mt,
+    stringsAsFactors = FALSE
+  )
+  qc_data_all <- rbind(qc_data_all, qc_data)
+}
+# =====
+
+# 样本质控图1：按样本分组的小提琴图
+p_qc_violin <- ggplot(qc_data_all, aes(x = Sample, y = nFeature_RNA, fill = Group)) +
+  geom_violin(scale = "width", trim = TRUE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  facet_wrap(~Group, scales = "free_x", nrow = 1) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = "Sample", y = "Number of Genes") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_qc_umi <- ggplot(qc_data_all, aes(x = Sample, y = nCount_RNA, fill = Group)) +
+  geom_violin(scale = "width", trim = TRUE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  scale_y_log10() +
+  facet_wrap(~Group, scales = "free_x", nrow = 1) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = "Sample", y = "UMI Counts (log10)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_qc_mt <- ggplot(qc_data_all, aes(x = Sample, y = percent.mt, fill = Group)) +
+  geom_violin(scale = "width", trim = TRUE) +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red") +
+  facet_wrap(~Group, scales = "free_x", nrow = 1) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = "Sample", y = "Mitochondrial %") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 组合质控图
+qc_plot_samples <- (p_qc_violin / p_qc_umi / p_qc_mt) + 
+  plot_layout(heights = c(1, 1, 1)) +
+  plot_annotation(title = "QC Metrics by Sample", theme = theme(plot.title = element_text(hjust = 0.5)))
+
+ggsave("figures/QC_by_sample.png", qc_plot_samples, width = 12, height = 10, dpi = 300)
+
+# 2.3 计算自动质控阈值
+calculate_sample_qc_thresholds <- function(seurat_list) {
+  
+  qc_thresholds <- data.frame()
+  
+  for (sample_name in names(seurat_list)) {
+    obj <- seurat_list[[sample_name]]
+    metrics <- obj@meta.data
+    
+    # 基因数阈值（基于MAD）
+    gene_median <- median(metrics$nFeature_RNA)
+    gene_mad <- mad(metrics$nFeature_RNA)
+    gene_upper <- gene_median + 5 * gene_mad
+    gene_lower <- max(200, gene_median - 5 * gene_mad)
+    
+    # UMI数阈值
+    umi_median <- median(log10(metrics$nCount_RNA + 1))
+    umi_mad <- mad(log10(metrics$nCount_RNA + 1))
+    umi_upper <- 10^(umi_median + 5 * umi_mad)
+    umi_lower <- 10^(max(0, umi_median - 5 * umi_mad))
+    
+    # 线粒体百分比阈值
+    mt_upper <- quantile(metrics$percent.mt, 0.99, na.rm = TRUE)
+    
+    thresholds <- data.frame(
+      Sample = sample_name,
+      Group = unique(obj$group),
+      nFeature_min = gene_lower,
+      nFeature_max = gene_upper,
+      nCount_min = umi_lower,
+      nCount_max = umi_upper,
+      percent_mt_max = min(20, mt_upper)  # 不超过20%
     )
-    plt.tight_layout()
-    plt.savefig('marker_gene_dotplot.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    print("✅ marker基因点图已保存")
-else:
-    print("⚠️ 无可用marker基因用于点图")
-
-# 绘制marker基因在小提琴图中的表达
-print("\n生成marker基因小提琴图...")
-
-# 选择关键细胞类型的代表性基因
-key_genes = ['Tnnt2', 'Col1a1', 'Pecam1', 'Cd68', 'Cd3d', 'Cd79a']
-key_genes = [gene for gene in key_genes if gene in adata.var_names]
-
-if key_genes:
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
     
-    for i, gene in enumerate(key_genes[:6]):
-        sc.pl.violin(adata, gene, groupby='cluster', ax=axes[i], show=False)
-        axes[i].set_title(f'{gene} expression')
-        axes[i].tick_params(axis='x', rotation=45)
+    qc_thresholds <- rbind(qc_thresholds, thresholds)
+  }
+  
+  return(qc_thresholds)
+}
+
+qc_thresholds <- calculate_sample_qc_thresholds(seurat_list)
+write.csv(qc_thresholds, "tables/QC_thresholds_by_sample.csv", row.names = FALSE)
+
+# 2.4 应用质控过滤
+
+for (sample_name in names(seurat_list)) {
+  cat(paste("  过滤样本:", sample_name, "\n"))
+  obj <- seurat_list[[sample_name]]
+  thresholds <- qc_thresholds[qc_thresholds$Sample == sample_name, ]
+  
+  # 过滤条件
+  cells_keep <- (
+    obj$nFeature_RNA >= thresholds$nFeature_min &
+    obj$nFeature_RNA <= thresholds$nFeature_max &
+    obj$nCount_RNA >= thresholds$nCount_min &
+    obj$nCount_RNA <= thresholds$nCount_max &
+    obj$percent.mt <= thresholds$percent_mt_max
+  )
+  
+  # 应用过滤
+  obj <- subset(obj, cells = colnames(obj)[cells_keep])
+  seurat_list[[sample_name]] <- obj
+  
+  cat(paste("    保留细胞数:", ncol(obj), 
+            "(", round(mean(cells_keep) * 100, 1), "%)\n"))
+}
+
+# 清除内存垃圾和无用数据
+gc()
+rm()
+# 3. 样本预处理
+# ============================================================================
+
+# 3.1 对每个样本进行SCTransform
+
+# 禁用并行计算
+plan("sequential")
+
+# 3.1 对每个样本进行SCTransform
+for (sample_name in names(seurat_list)) {
+  cat(paste("  SCTransform处理样本:", sample_name, "\n"))
+  obj <- seurat_list[[sample_name]]
+  
+  # 确保有percent.mt
+  if (is.null(obj$percent.mt)) {
+    obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
+  }
+  
+  # 运行SCTransform
+  obj <- SCTransform(obj, vst.flavor = "v1", vars.to.regress = c("percent.mt", "nCount_RNA"), verbose = FALSE)
+  seurat_list[[sample_name]] = obj
+}
+
+# 3.2 整合流程
+features <- SelectIntegrationFeatures(object.list = seurat_list, nfeatures = 3000)
+
+# 准备SCTransform数据用于整合
+seurat_list <- PrepSCTIntegration(object.list = seurat_list, anchor.features = features)
+
+# 寻找整合锚点
+anchors <- FindIntegrationAnchors(object.list = seurat_list, normalization.method = "SCT", anchor.features = features)
+
+cat("  整合数据...\n")
+merged_obj <- IntegrateData(anchorset = anchors, normalization.method = "SCT")
+# 报错如下时不影响结果，仅起到提示作用
+# Warning: Layer counts isn't present in the assay object; returning NULL
+# Warning: Assay integrated changing from Assay to SCTAssay
+# Warning: Layer counts isn't present in the assay object; returning NULL
+# Warning messages:
+# 1: Different cells and/or features from existing assay SCT
+# 2: Different cells and/or features from existing assay SCT
+# 3: Different cells and/or features from existing assay SCT
+# 4: Different cells and/or features from existing assay SCT
+# 5: Different cells and/or features from existing assay SCT
+# 6: Different cells and/or features from existing assay SCT
+# 7: Different cells and/or features from existing assay SCT
+# 8: Different cells and/or features from existing assay SCT
+# 9: In asMethod(object) :
+#   sparse->dense coercion: allocating vector of size 1.3 GiB
+# 10: Different cells and/or features from existing assay SCT
+
+cat(paste("整合后细胞总数:", ncol(merged_obj), "\n"))
+cat(paste("整合后基因总数:", nrow(merged_obj), "\n"))
+
+# 检查对象中的assay
+print(Assays(merged_obj))
+
+# 检查默认assay
+cat(paste("当前默认assay:", DefaultAssay(merged_obj), "\n"))
+
+# 根据实际情况设置默认assay
+if (!is.null(merged_obj@assays)) {
+  cat("assays中的内容:\n")
+  for (assay_name in names(merged_obj@assays)) {
+    cat(paste("\nassay:", assay_name, "\n"))
+    assay_obj <- merged_obj@assays[[assay_name]]
+    cat(paste("  类:", class(assay_obj), "\n"))
+    cat(paste("  维度:", nrow(assay_obj), "x", ncol(assay_obj), "\n"))
+  }
+}
+
+# DefaultAssay(merged_obj) <- "integrated"
+
+# 查看对象的metadata
+cat("\n对象metadata的前几行:\n")
+print(head(merged_obj@meta.data, 3))
+
+# 查看细胞数统计
+cat("\n各组细胞数:\n")
+print(table(merged_obj$sample_id, merged_obj$group))
+
+cat("整合步骤完成。\n")
+
+# 3.3 缩放和PCA
+cat("运行PCA分析...\n")
+
+# 注意：对于SCT归一化后的数据，通常不需要运行ScaleData
+# 因为SCTransform已经包含了缩放步骤
+# merged_obj <- ScaleData(merged_obj, verbose = FALSE)  # 可以注释掉
+
+# 运行PCA
+merged_obj <- RunPCA(merged_obj,npcs = 30,verbose = FALSE)
+
+# 注意：不需要显式指定features，因为默认会使用integrated assay的高变基因
+# 但integrated assay只有3000个基因，都是高变基因
+
+# 批次效应可视化
+p_batch_pca <- DimPlot(merged_obj, 
+                      reduction = "pca", 
+                      group.by = "sample_id",
+                      shuffle = TRUE,
+                      pt.size = 0.5) +
+  scale_color_brewer(palette = "Set3") +
+  ggtitle("PCA: Colored by Sample") +
+  theme_minimal()
+
+p_batch_group <- DimPlot(merged_obj, 
+                        reduction = "pca", 
+                        group.by = "group",
+                        shuffle = TRUE,
+                        pt.size = 0.5) +
+  scale_color_brewer(palette = "Set1") +
+  ggtitle("PCA: Colored by Group") +
+  theme_minimal()
+
+p_batch_batch <- DimPlot(merged_obj, 
+                        reduction = "pca", 
+                        group.by = "batch",
+                        shuffle = TRUE,
+                        pt.size = 0.5) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("PCA: Colored by Batch") +
+  theme_minimal()
+
+# 添加PCA分量的碎石图
+p_elbow <- ElbowPlot(merged_obj, ndims = 30) +  # 改为30，因为我们只计算了30个PC
+  ggtitle("Elbow Plot") +
+  theme_minimal()
+
+# 组合图
+batch_plots <- (p_batch_pca | p_batch_group | p_batch_batch) / p_elbow +
+  plot_layout(heights = c(1, 1.5))
+
+# 确保图形目录存在
+if (!dir.exists("figures")) {
+  dir.create("figures", recursive = TRUE)
+}
+
+ggsave("figures/batch_effect_analysis.png", batch_plots, width = 15, height = 10, dpi = 300, bg = "white")
+
+# 3.5 保存中间结果
+cat("保存整合后的对象...\n")
+if (!dir.exists("data")) {
+  dir.create("data", recursive = TRUE)
+}
+saveRDS(merged_obj, file = "data/merged_sct_integrated.rds")
+cat("对象已保存到: data/merged_sct_integrated.rds\n")
+
+# 3.6 可选：使用Harmony进行进一步批次校正
+# 如果你的样本间批次效应仍然很强
+# if (requireNamespace("harmony", quietly = TRUE)) {
+#   cat("使用Harmony进行批次校正...\n")
+#   library(harmony)
+#   
+#   # 运行Harmony
+#   merged_obj <- RunHarmony(
+#     merged_obj,
+#     group.by.vars = "sample_id",  # 按样本进行校正
+#     reduction = "pca",
+#     assay.use = "integrated",
+#     project.dim = FALSE
+#   )
+#   
+#   # 可视化Harmony校正后的结果
+#   p_harmony <- DimPlot(merged_obj, 
+#                       reduction = "harmony", 
+#                       group.by = "sample_id",
+#                       shuffle = TRUE,
+#                       pt.size = 0.5) +
+#     scale_color_brewer(palette = "Set3") +
+#     ggtitle("Harmony: Colored by Sample") +
+#     theme_minimal()
+#   
+#   ggsave("figures/harmony_correction.png", p_harmony, width = 8, height = 6, dpi = 300, bg = "white")
+#   
+#   # 保存Harmony校正后的对象
+#   saveRDS(merged_obj, file = "data/merged_harmony_corrected.rds")
+#   cat("Harmony校正完成，对象已保存。\n")
+# }
+
+gc()
+rm()
+# 4. 批次校正和整合
+# ============================================================================
+cat("\n=== 4. 批次校正和整合 ===\n")
+
+# 4.1 Harmony（推荐用于多个批次）
+cat("使用Harmony进行批次校正...\n")
+
+# 注意：由于使用了SCTransform整合流程，我们现在应该使用integrated assay
+# 检查批次信息
+cat("批次信息检查:\n")
+print(unique(merged_obj$batch))
+print(length(unique(merged_obj$batch)))
+
+# 运行Harmony
+# 由于之前一步显示batch都是1，我们只用sample_id
+merged_obj <- RunHarmony(merged_obj,"sample_id","pca")
+# 4.2 使用Harmony结果进行下游分析
+cat("使用Harmony校正后的结果...\n")
+
+# 使用Harmony降维结果
+merged_obj <- RunUMAP(
+  merged_obj,
+  reduction = "harmony",
+  dims = 1:30,
+  reduction.name = "umap_harmony",
+  reduction.key = "UMAPHARMONY_"
+)
+
+merged_obj <- RunTSNE(
+  merged_obj,
+  reduction = "harmony",
+  dims = 1:30,
+  reduction.name = "tsne_harmony",
+  reduction.key = "TSNEHARMONY_",
+  max_iter = 5000,          # 由于前面的Harmony出现warning，增加最大迭代次数
+  perplexity = 30,          # 添加perplexity参数
+  check_duplicates = FALSE  # 关闭重复检查
+)
+
+# 4.3 构建KNN图和聚类
+cat("构建KNN图和聚类...\n")
+
+merged_obj <- FindNeighbors(
+  merged_obj,
+  reduction = "harmony",
+  dims = 1:30
+)
+
+# 用多个分辨率测试聚类
+resolutions <- c(0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2)
+
+# 设置随机种子
+set.seed(1234)
+
+# 运行聚类
+for (res in resolutions) {
+  merged_obj <- FindClusters(
+    merged_obj,
+    resolution = res,
+    algorithm = 1,
+    random.seed = 1234
+  )
+}
+
+# 查看聚类结果的列名
+cat("聚类结果列名:\n")
+print(grep("^integrated_snn_res|^SCT_snn_res", colnames(merged_obj@meta.data), value = TRUE))
+
+# 使用clustree可视化分辨率聚类结果
+if (requireNamespace("clustree", quietly = TRUE)) {
+  library(clustree)
+  
+  # 检查使用哪个前缀
+  cluster_cols <- grep("^integrated_snn_res|^SCT_snn_res", colnames(merged_obj@meta.data), value = TRUE)
+  if (length(cluster_cols) > 0) {
+    # 使用正确的列名前缀
+    if (any(grepl("^integrated_snn_res", cluster_cols))) {
+      prefix <- "integrated_snn_res."
+    } else {
+      prefix <- "SCT_snn_res."
+    }
     
-    plt.suptitle('关键marker基因在各聚类中的表达', fontsize=16, y=1.02)
-    plt.tight_layout()
-    plt.savefig('marker_gene_violin.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✅ marker基因小提琴图已保存")
+    clustree_plot <- clustree(merged_obj, prefix = prefix)
+    ggsave("figures/clustree.png", clustree_plot, width = 10, height = 8, dpi = 300)
+  } else {
+    cat("警告: 未找到聚类列\n")
+  }
+} else {
+  cat("clustree包未安装，跳过clustree可视化\n")
+}
 
-# ======== 自动化细胞类型注释 ========
-print("\n" + "="*60)
-print("自动化细胞类型注释")
-print("="*60)
+# 选择最佳分辨率
+selected_resolution <- 0.4  # 根据clustree图选择
 
-# 方法1：基于marker基因评分
-print("方法1: 基于marker基因评分进行注释...")
+# 设置最终的聚类结果
+# 注意：由于使用了integrated assay，聚类列名应该是"integrated_snn_res.X"
+cluster_col <- paste0("integrated_snn_res.", selected_resolution)
+if (cluster_col %in% colnames(merged_obj@meta.data)) {
+  merged_obj$seurat_clusters <- merged_obj[[cluster_col]]
+  cat(paste("已设置seurat_clusters为", cluster_col, "\n"))
+} else {
+  # 尝试其他可能的列名
+  cluster_col <- paste0("SCT_snn_res.", selected_resolution)
+  if (cluster_col %in% colnames(merged_obj@meta.data)) {
+    merged_obj$seurat_clusters <- merged_obj[[cluster_col]]
+    cat(paste("已设置seurat_clusters为", cluster_col, "\n"))
+  } else {
+    # 使用最高分辨率
+    cluster_cols <- grep("^integrated_snn_res|^SCT_snn_res", colnames(merged_obj@meta.data), value = TRUE)
+    if (length(cluster_cols) > 0) {
+      merged_obj$seurat_clusters <- merged_obj[[cluster_cols[1]]]
+      cat(paste("已设置seurat_clusters为", cluster_cols[1], "\n"))
+    } else {
+      cat("警告: 未找到聚类列，手动创建一个\n")
+      merged_obj$seurat_clusters <- as.character(merged_obj@meta.data[, grep("res\\.", colnames(merged_obj@meta.data), value = TRUE)[1]])
+    }
+  }
+}
 
-from scipy import stats
+# 4.4 绘制批次校正后的结果
+cat("绘制批次校正后的可视化...\n")
 
-def annotate_by_marker_scores(adata, marker_dict, min_score=0.3):
-    """基于marker基因评分进行细胞类型注释"""
+# 确保图形目录存在
+if (!dir.exists("figures")) {
+  dir.create("figures", recursive = TRUE)
+}
+
+# 校正前后的比较
+# 使用PCA散点图（校正前）和Harmony散点图（校正后）
+p_before <- DimPlot(merged_obj, 
+                   reduction = "pca",  # 使用原始PCA
+                   group.by = "sample_id",
+                   shuffle = TRUE,
+                   pt.size = 0.5) +
+  scale_color_brewer(palette = "Set3") +
+  ggtitle("Before Harmony: PCA colored by Sample") +
+  theme_minimal()
+
+p_after <- DimPlot(merged_obj, 
+                  reduction = "harmony",  # 使用harmony
+                  group.by = "sample_id",
+                  shuffle = TRUE,
+                  pt.size = 0.5) +
+  scale_color_brewer(palette = "Set3") +
+  ggtitle("After Harmony: Harmony colored by Sample") +
+  theme_minimal()
+
+batch_correction_plot <- (p_before | p_after) + plot_layout(ncol = 2)
+
+ggsave("figures/batch_correction_comparison.png", batch_correction_plot,width = 12, height = 5, dpi = 300, bg = "white")
+
+# 按组着色
+p_group <- DimPlot(merged_obj, 
+                  reduction = "umap_harmony", 
+                  group.by = "group",
+                  shuffle = TRUE,
+                  pt.size = 0.5) +
+  scale_color_brewer(palette = "Set1") +
+  ggtitle("UMAP: Colored by Group") +
+  theme_minimal()
+
+# 按聚类着色
+p_cluster <- DimPlot(merged_obj, 
+                    reduction = "umap_harmony", 
+                    group.by = "seurat_clusters",
+                    label = TRUE,
+                    shuffle = TRUE,
+                    pt.size = 0.5) +
+  scale_color_discrete() +
+  ggtitle("UMAP: Colored by Cluster") +
+  theme_minimal()
+
+# 组合图
+integration_summary <- (p_group | p_cluster) + plot_layout(ncol = 2)
+
+ggsave("figures/integration_summary.png", integration_summary,width = 12, height = 5, dpi = 300, bg = "white")
+
+# 保存最终对象
+saveRDS(merged_obj, file = "data/merged_final_harmony.rds")
+cat("最终对象已保存到: data/merged_final_harmony.rds\n")
+
+cat("\n=== 批次校正和聚类完成 ===\n")
+
+gc()
+rm()
+# 5. 细胞类型注释
+# ============================================================================
+cat("\n=== 5. 细胞类型注释 ===\n")
+
+# 5.0 设置正确的assay
+cat("检查assay设置...\n")
+
+# 如果SCT assay存在，使用它（来自SCTransform）
+if ("SCT" %in% names(merged_obj@assays)) {
+  DefaultAssay(merged_obj) <- "SCT"
+  cat("  使用SCT assay（来自SCTransform）\n")
+} else {
+  # 如果没有SCT assay，回退到RNA
+  DefaultAssay(merged_obj) <- "RNA"
+  cat("  使用RNA assay（SCT不可用）\n")
+}
+
+cat("当前assay:", DefaultAssay(merged_obj), "\n\n")
+
+# 5.1 定义心脏组织的细胞类型marker基因
+cardiac_markers <- list(
+  Cardiomyocyte = c("Tnnt2", "Myh7", "Myh6", "Nppa", "Nppb", "Ttn", "Ryr2", "Actc1", "Myl2"),
+  Fibroblast = c("Col1a1", "Col3a1", "Dcn", "Fbln1", "Pdgfra", "Lum", "Postn", "Tcf21"),
+  Endothelial = c("Pecam1", "Vwf", "Cdh5", "Cldn5", "Sele", "Cd34", "Emcn", "Kdr"),
+  Macrophage = c("Cd14", "Cd68", "Itgax", "H2-Aa", "Csf1r", "Cd163", "Mrc1", "Adgre1"),
+  T_Cell = c("Cd3d", "Cd3e", "Cd4", "Cd8a", "Il7r", "Trac", "Trbc2", "Cd3g"),
+  B_Cell = c("Ms4a1", "Cd79a", "Cd19", "Cd79b", "Bank1", "Cd20"),
+  NK_Cell = c("Nkg7", "Gnly", "Klrd1", "Klrf1", "Ncr1"),
+  Monocyte = c("Cd14", "Fcgr3", "S100a8", "S100a9", "Vcan"),
+  Dendritic_Cell = c("Cd1c", "Clec9a", "Xcr1", "Batf3", "Irf8"),
+  Smooth_Muscle = c("Acta2", "Myh11", "Tagln", "Cnn1", "Mylk"),
+  Pericyte = c("Rgs5", "Pdgfrb", "Cspg4", "Kcnj8", "Abcc9"),
+  Adipocyte = c("Adipoq", "Lep", "Fabp4", "Plin1", "Cidea"),
+  Neuron = c("Nefl", "S100b", "Plp1", "Rbfox3", "Syp"),
+  Erythrocyte = c("Hba-a1", "Hba-a2", "Hbb-bt", "Hbb-bs", "Alas2"),
+  Platelet = c("Ppbp", "Pf4", "Itga2b", "Gp1ba", "Clu")
+)
+
+# 5.2 计算细胞类型得分
+cat("计算细胞类型得分...\n")
+
+# 为每个细胞类型计算模块得分
+for (cell_type in names(cardiac_markers)) {
+  markers <- cardiac_markers[[cell_type]]
+  
+  # 只保留在数据中存在的基因
+  markers_present <- markers[markers %in% rownames(merged_obj)]
+  
+  if (length(markers_present) >= 3) {
+    cat(sprintf("  为 %s 计算得分 (使用 %d/%d 个基因)\n", 
+                cell_type, length(markers_present), length(markers)))
     
-    # 为每个细胞类型计算平均表达
-    cell_type_scores = {}
+    merged_obj <- AddModuleScore(
+      merged_obj,
+      features = list(markers_present),
+      name = cell_type,
+      ctrl = 100,
+      assay = DefaultAssay(merged_obj)  # 使用当前默认assay
+    )
+  } else {
+    cat(sprintf("  跳过 %s: 在数据中只找到 %d 个基因 (需要至少3个)\n", 
+                cell_type, length(markers_present)))
+  }
+}
+
+# 5.3 自动注释细胞类型
+cat("\n自动注释细胞类型...\n")
+
+# 创建得分矩阵
+score_columns <- paste0(names(cardiac_markers), "1")
+score_columns <- score_columns[score_columns %in% colnames(merged_obj@meta.data)]
+
+if (length(score_columns) > 0) {
+  score_matrix <- merged_obj@meta.data[, score_columns, drop = FALSE]
+  colnames(score_matrix) <- gsub("1$", "", colnames(score_matrix))
+  
+  # 为每个细胞分配得分最高的细胞类型
+  cell_type_assignments <- apply(score_matrix, 1, function(scores) {
+    if (max(scores) > 0.5) {  # 阈值
+      names(which.max(scores))
+    } else {
+      "Unknown"
+    }
+  })
+  
+  merged_obj$predicted_celltype <- cell_type_assignments
+  
+  # 统计细胞类型分布
+  celltype_counts <- table(merged_obj$predicted_celltype)
+  cat("\n细胞类型分布:\n")
+  print(celltype_counts)
+} else {
+  cat("警告：未找到任何细胞类型得分列\n")
+  merged_obj$predicted_celltype <- rep("Unknown", ncol(merged_obj))
+}
+
+# 5.4 使用SingleR进行验证（可选，但推荐）
+cat("\n使用SingleR进行验证\n")
+
+# 如果没有下载RData，提前下载好放到工作文件夹中
+# 加载参考数据
+load("MouseRNAseqData.Rdata")
+
+# 获取参考数据对象
+loaded_objects <- ls()
+print(loaded_objects)
+my_ref <- ref
+
+# 运行SingleR分析
+sce <- as.SingleCellExperiment(merged_obj, assay = "SCT")
+# 报错如下时候不影响
+# Found more than one class "package_version" in cache; using the first, from namespace 'SeuratObject'
+# Also defined by ‘alabaster.base’
+
+singler_results <- SingleR(test = sce, 
+			   ref = my_ref, 
+			   labels = my_ref$label.main,
+			   # 可以加入method = "cluster"
+			   # 加入method时要加入clusters = clusters，作为对类群注释，速度更快，不加入时对每个细胞注释，运行时间长		  	                   assay.type.test = "logcounts",  # 指定测试数据使用 logcounts
+                           assay.type.ref = "logcounts")
+
+# 将结果添加到原始对象
+merged_obj$SingleR_labels <- singler_results$labels
+merged_obj$SingleR_scores <- singler_results$scores
+
+# 5. 查看结果
+	
+
+# 5.5 绘制细胞类型注释结果
+cat("\n绘制细胞类型注释结果...\n")
+
+# 细胞类型UMAP
+p_celltype_umap <- DimPlot(merged_obj, 
+                          reduction = "umap_harmony", 
+                          group.by = "predicted_celltype",
+                          label = TRUE,
+                          repel = TRUE,
+                          shuffle = TRUE) +
+  scale_color_discrete(name = "Cell Type") +
+  ggtitle("Predicted Cell Types (UMAP)") +
+  theme_minimal()
+
+# 如果进行了SingleR验证，也绘制SingleR结果
+if ("SingleR_labels" %in% colnames(merged_obj@meta.data)) {
+  p_singler_umap <- DimPlot(merged_obj, 
+                           reduction = "umap_harmony", 
+                           group.by = "SingleR_labels",
+                           label = TRUE,
+                           repel = TRUE,
+                           shuffle = TRUE) +
+    scale_color_discrete(name = "SingleR") +
+    ggtitle("SingleR Annotations (UMAP)") +
+    theme_minimal()
+  
+  # 组合两个图
+  p_combined <- p_celltype_umap | p_singler_umap
+  ggsave("figures/celltype_annotation_comparison.png", p_combined, width = 16, height = 8, dpi = 300)
+} else {
+  ggsave("figures/celltype_annotation_umap.png", p_celltype_umap, width = 10, height = 8, dpi = 300)
+}
+
+# 按组着色的细胞类型
+p_celltype_by_group <- DimPlot(merged_obj, 
+                              reduction = "umap_harmony", 
+                              group.by = "predicted_celltype",
+                              split.by = "group",
+                              shuffle = TRUE) +
+  scale_color_discrete(name = "Cell Type") +
+  ggtitle("Cell Types by Group") +
+  theme_minimal()
+
+ggsave("figures/celltype_by_group.png", p_celltype_by_group, width = 12, height = 6, dpi = 300)
+
+# 细胞类型比例条形图
+celltype_prop_data <- merged_obj@meta.data %>%
+  group_by(group, predicted_celltype) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(proportion = count / sum(count) * 100) %>%
+  ungroup()
+
+p_celltype_prop <- ggplot(celltype_prop_data, 
+                         aes(x = predicted_celltype, y = proportion, fill = group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_brewer(palette = "Set1", name = "Group") +
+  labs(x = "Cell Type", y = "Percentage (%)") +
+  ggtitle("Cell Type Proportions by Group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("figures/celltype_proportions.png", p_celltype_prop, width = 10, height = 6, dpi = 300)
+
+# 5.6 保存注释结果
+cat("\n保存注释结果...\n")
+write.csv(merged_obj@meta.data, file = "results/cell_annotations.csv")
+saveRDS(merged_obj, file = "results/annotated_seurat_object.rds")
+
+cat("✅ 细胞类型注释完成\n")
+
+gc()
+rm()
+# 6. 差异表达分析
+# ============================================================================
+cat("\n=== 6. 差异表达分析 ===\n")
+
+
+# 6.1 设置差异分析的ident
+Idents(merged_obj) <- "predicted_celltype"
+
+# 6.2 查找细胞类型特异的marker基因
+cat("查找细胞类型特异的marker基因...\n")
+
+merged_obj <- PrepSCTFindMarkers(merged_obj)
+celltype_markers <- FindAllMarkers(
+  merged_obj,
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  test.use = "wilcox"
+)
+
+# 保存结果
+write.csv(celltype_markers, "tables/celltype_specific_markers.csv", row.names = FALSE)
+
+# 6.3 组间差异分析（DM vs Ctrl）
+cat("进行组间差异分析（DM vs Ctrl）...\n")
+
+# 为每个细胞类型进行DM vs Ctrl的差异分析
+de_results_by_celltype <- list()
+
+unique_celltypes <- unique(merged_obj$predicted_celltype)
+for (celltype in unique_celltypes) {
+  cat(paste("  分析细胞类型:", celltype, "\n"))
+
+  # 提取该细胞类型的子集
+  cells_subset <- WhichCells(merged_obj, expression = predicted_celltype == celltype)
+  subset_obj <- subset(merged_obj, cells = cells_subset)
+
+  if (ncol(subset_obj) < 10) {
+    cat(paste("    细胞数太少(", ncol(subset_obj), ")，跳过\n"))
+    next
+  }
+
+  # 设置ident为group
+  Idents(subset_obj) <- "group"
+
+  # 强制重新计算SCT以避免PrepSCTFindMarkers错误
+  # 先提取原始counts
+  counts <- GetAssayData(subset_obj, assay = "RNA", layer = "counts")  # 修改这里
+
+  # 重新创建Seurat对象
+  subset_obj <- CreateSeuratObject(counts = counts, meta.data = subset_obj@meta.data)
+  subset_obj$group <- subset_obj@meta.data$group
+
+  # 重新进行SCT变换
+  subset_obj <- SCTransform(subset_obj, vars.to.regress = c("nCount_RNA", "percent.mt"), verbose = FALSE)
+
+  # 设置ident
+  Idents(subset_obj) <- "group"
+
+  # 查找差异基因
+  de_genes <- FindMarkers(
+    subset_obj,
+    assay = "SCT",  # 明确指定使用SCT assay
+    ident.1 = "DM",
+    ident.2 = "Ctrl",
+    min.pct = 0.1,
+    logfc.threshold = 0.25,
+    test.use = "wilcox"
+  )
+
+  # 添加基因名和细胞类型
+  de_genes$gene <- rownames(de_genes)
+  de_genes$celltype <- celltype
+  de_genes$direction <- ifelse(de_genes$avg_log2FC > 0, "Up_in_DM", "Down_in_DM")
+
+  de_results_by_celltype[[celltype]] <- de_genes
+
+  # 保存每个细胞类型的差异基因
+  write.csv(de_genes, paste0("tables/DE_genes_", gsub("/", "_", celltype), "_DM_vs_Ctrl.csv"),row.names = FALSE)
+}
+# 报错如下时无需处理，单细胞数据中有很多基因在很多细胞中表达为零
+#   cannot compute exact p-value with ties
+
+# 6.4 合并所有差异分析结果
+all_de_genes <- do.call(rbind, de_results_by_celltype)
+write.csv(all_de_genes, "tables/all_DE_genes_by_celltype.csv", row.names = FALSE)
+
+# 6.5 绘制差异基因热图
+cat("绘制差异基因热图...\n")
+
+# 选择每个细胞类型的top差异基因
+# 提取top差异基因
+top_de_genes <- all_de_genes %>%
+  group_by(celltype) %>%
+  filter(p_val_adj < 0.05) %>%
+  arrange(desc(abs(avg_log2FC))) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+if (nrow(expr_matrix) > 0) {
+  # 对数据进行缩放
+  expr_scaled <- t(scale(t(expr_matrix)))
+  expr_scaled[is.na(expr_scaled)] <- 0
+  expr_scaled[is.infinite(expr_scaled)] <- 0
+
+  # 确保使用 pheatmap 包，而不是 ComplexHeatmap 的版本
+  if ("package:ComplexHeatmap" %in% search()) {
+    detach("package:ComplexHeatmap", unload = TRUE)
+  }
+  library(pheatmap)
+
+  # 直接保存为文件（不使用 ggsave）
+  pheatmap(expr_scaled,
+           color = colorRampPalette(c("blue", "white", "red"))(50),
+           main = "Top DE Genes by Cell Type and Group",
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,   # 不聚类列
+           show_rownames = TRUE,
+           fontsize_row = 8,
+           angle_col = "45",
+           filename = "figures/DE_genes_heatmap.png",   # 直接保存
+           width = 12,            # 单位：英寸
+           height = 10,
+           dpi = 300)
+
+  cat("热图已保存到: figures/DE_genes_heatmap.png\n")
+}
+
+# 7. 通路富集分析
+# ============================================================================
+cat("\n=== 7. 通路富集分析 ===\n")
+
+# 加载包
+library(clusterProfiler)
+library(org.Mm.eg.db)   # 小鼠注释包
+library(enrichplot)
+library(dplyr)
+
+cat("进行通路富集分析...\n")
+go_results_by_celltype <- list()
+
+for (celltype in unique_celltypes) {
+  if (!celltype %in% names(de_results_by_celltype)) {
+    cat("跳过", celltype, "：不在de_results_by_celltype中\n")
+    next
+  }
+  
+  de_data <- de_results_by_celltype[[celltype]]
+  
+  # 筛选显著上调的基因
+  up_genes <- de_data %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 0.5) %>%
+    pull(gene)
+  
+  cat("细胞类型", celltype, "：找到", length(up_genes), "个上调基因\n")
+  
+  if (length(up_genes) < 5) {
+    cat("  上调基因不足5个，跳过GO分析\n")
+    next
+  }
+  
+  # 基因ID转换（Symbol -> ENTREZID）
+  suppressMessages({
+    id_conversion <- tryCatch(
+      bitr(up_genes, 
+           fromType = "SYMBOL", 
+           toType = "ENTREZID", 
+           OrgDb = org.Mm.eg.db),
+      error = function(e) {
+        cat("  基因ID转换失败:", e$message, "\n")
+        return(NULL)
+      }
+    )
+  })
+  
+  if (is.null(id_conversion) || nrow(id_conversion) == 0) {
+    cat("  无有效的ENTREZID，跳过\n")
+    next
+  }
+  
+  up_genes_entrez <- id_conversion$ENTREZID
+  
+  # GO富集分析（BP）
+  go_up <- tryCatch(
+    enrichGO(gene = up_genes_entrez,
+             OrgDb = org.Mm.eg.db,
+             ont = "BP",
+             pAdjustMethod = "BH",
+             pvalueCutoff = 0.05,
+             qvalueCutoff = 0.05,
+             readable = TRUE),
+    error = function(e) {
+      cat("  富集分析出错:", e$message, "\n")
+      return(NULL)
+    }
+  )
+  
+  if (is.null(go_up) || nrow(go_up) == 0) {
+    cat("  未得到显著的GO term\n")
+    next
+  }
+  
+  # 保存结果对象
+  go_results_by_celltype[[paste0(celltype, "_up")]] <- go_up
+  
+  # 绘制气泡图（top 10）
+  p <- dotplot(go_up, showCategory = 10) +
+    ggtitle(paste("GO Enrichment -", celltype, "(Up in DM)")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # 保存图片（文件名中避免特殊字符）
+  safe_name <- gsub("/", "_", celltype)
+  ggsave(filename = paste0("figures/GO_", safe_name, "_up.png"),
+         plot = p, width = 10, height = 8, dpi = 300)
+  
+  cat("  已保存", celltype, "的GO结果，显著term数:", nrow(go_up), "\n")
+}
+# 上述报warning massages正常，In bitr(up_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db) 下面较小（这项中是小于4%）影响不大
+
+cat("\n=== 开始整体差异表达分析 (Ctrl vs DM) ===\n")
+
+# 1. 设置默认 assay 和身份类别
+DefaultAssay(merged_obj) <- "RNA"
+Idents(merged_obj) <- merged_obj$group   # 假设 group 列包含 "Ctrl" 和 "DM"
+
+# 2. 整体差异表达分析（将所有细胞视为一个群体）
+# 注意：这种方法会受到细胞组成偏移的影响，仅供整体趋势参考
+de_all <- FindMarkers(merged_obj,
+                      ident.1 = "DM",
+                      ident.2 = "Ctrl",
+                      logfc.threshold = 0,
+                      min.pct = 0.1,
+                      test.use = "wilcox")   # 或 "MAST" 但较慢
+
+# 添加基因列
+de_all$gene <- rownames(de_all)
+
+# 筛选显著差异基因
+sig_all <- de_all %>%
+  filter(p_val_adj < 0.05, abs(avg_log2FC) > 0.5)
+
+# 上调基因（DM 中高表达）
+up_all <- sig_all %>%
+  filter(avg_log2FC > 0.5) %>%
+  pull(gene)
+
+# 下调基因（Ctrl 中高表达 / DM 中低表达）
+down_all <- sig_all %>%
+  filter(avg_log2FC < -0.5) %>%
+  pull(gene)
+
+cat(sprintf("整体差异基因: 上调 %d 个, 下调 %d 个\n", length(up_all), length(down_all)))
+
+# 3. 基因ID转换函数（带错误处理和映射率提示）
+convert_genes <- function(genes, name) {
+  if (length(genes) < 5) {
+    cat(sprintf("%s 基因数量不足5个，跳过转换\n", name))
+    return(NULL)
+  }
+  suppressWarnings({
+    conv <- bitr(genes, 
+                 fromType = "SYMBOL", 
+                 toType = "ENTREZID", 
+                 OrgDb = org.Mm.eg.db)
+  })
+  if (is.null(conv) || nrow(conv) == 0) {
+    cat(sprintf("%s 基因ID转换失败或空结果\n", name))
+    return(NULL)
+  }
+  cat(sprintf("%s 基因转换成功: %d/%d (%.1f%%)\n", 
+              name, nrow(conv), length(genes), nrow(conv)/length(genes)*100))
+  return(conv$ENTREZID)
+}
+
+up_entrez <- convert_genes(up_all, "整体上调")
+down_entrez <- convert_genes(down_all, "整体下调")
+
+# 4. 执行 GO 富集分析（BP）
+if (!is.null(up_entrez) && length(up_entrez) >= 5) {
+  go_up_all <- enrichGO(gene = up_entrez,
+                        OrgDb = org.Mm.eg.db,
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff = 0.05,
+                        readable = TRUE)
+} else {
+  go_up_all <- NULL
+}
+
+if (!is.null(down_entrez) && length(down_entrez) >= 5) {
+  go_down_all <- enrichGO(gene = down_entrez,
+                          OrgDb = org.Mm.eg.db,
+                          ont = "BP",
+                          pAdjustMethod = "BH",
+                          pvalueCutoff = 0.05,
+                          qvalueCutoff = 0.05,
+                          readable = TRUE)
+} else {
+  go_down_all <- NULL
+}
+
+# 5. 保存结果
+dir.create("figures", showWarnings = FALSE)
+dir.create("objects", showWarnings = FALSE)
+
+# 保存 RDS
+saveRDS(list(up = go_up_all, down = go_down_all), file = "objects/GO_overall_results.rds")
+
+# 保存表格
+if (!is.null(go_up_all) && nrow(go_up_all) > 0) {
+  write.csv(as.data.frame(go_up_all), "tables/GO_overall_up.csv", row.names = FALSE)
+}
+if (!is.null(go_down_all) && nrow(go_down_all) > 0) {
+  write.csv(as.data.frame(go_down_all), "tables/GO_overall_down.csv", row.names = FALSE)
+}
+
+# 6. 可视化
+# 上调基因的气泡图
+if (!is.null(go_up_all) && nrow(go_up_all) > 0) {
+  suppressWarnings({
+    p_up <- dotplot(go_up_all, showCategory = 15) +
+      ggtitle("GO Enrichment (DM vs Ctrl) - Up-regulated genes in DM") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    ggsave("figures/GO_overall_up_dotplot.png", p_up, width = 12, height = 10, dpi = 300)
     
-    for cell_type, genes in marker_dict.items():
-        available_genes = [g for g in genes if g in adata.var_names]
-        if len(available_genes) >= 2:  # 至少需要2个基因
-            # 计算该细胞类型在所有细胞中的平均表达
-            expr_matrix = adata[:, available_genes].X
-            if hasattr(expr_matrix, 'toarray'):
-                expr_matrix = expr_matrix.toarray()
-            
-            # 计算每个细胞的平均表达（z-score标准化）
-            cell_scores = expr_matrix.mean(axis=1)
-            cell_scores_z = stats.zscore(cell_scores)
-            
-            cell_type_scores[cell_type] = cell_scores_z
+    p_up_bar <- barplot(go_up_all, showCategory = 15) +
+      ggtitle("GO Enrichment (DM vs Ctrl) - Up-regulated genes in DM")
+    ggsave("figures/GO_overall_up_barplot.png", p_up_bar, width = 10, height = 8, dpi = 300)
+  })
+}
+
+if (!is.null(go_down_all) && nrow(go_down_all) > 0) {
+  suppressWarnings({
+    p_down <- dotplot(go_down_all, showCategory = 15) +
+      ggtitle("GO Enrichment (DM vs Ctrl) - Down-regulated genes in DM") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    ggsave("figures/GO_overall_down_dotplot.png", p_down, width = 12, height = 10, dpi = 300)
     
-    if not cell_type_scores:
-        print("⚠️ 无足够marker基因进行评分")
-        return adata
-    
-    # 为每个细胞分配最可能的细胞类型
-    cell_type_names = list(cell_type_scores.keys())
-    score_matrix = np.column_stack([cell_type_scores[ct] for ct in cell_type_names])
-    
-    # 找到每个细胞的最高分
-    max_scores = score_matrix.max(axis=1)
-    best_types = np.argmax(score_matrix, axis=1)
-    
-    # 创建注释列
-    adata.obs['predicted_celltype'] = 'Unknown'
-    adata.obs['prediction_score'] = 0.0
-    
-    for i in range(len(adata)):
-        if max_scores[i] >= min_score:
-            adata.obs.iloc[i, adata.obs.columns.get_loc('predicted_celltype')] = cell_type_names[best_types[i]]
-            adata.obs.iloc[i, adata.obs.columns.get_loc('prediction_score')] = max_scores[i]
-    
-    return adata
+    p_down_bar <- barplot(go_down_all, showCategory = 15) +
+      ggtitle("GO Enrichment (DM vs Ctrl) - Down-regulated genes in DM")
+    ggsave("figures/GO_overall_down_barplot.png", p_down_bar, width = 10, height = 8, dpi = 300)
+  })
+}
 
-# 运行自动化注释
-adata = annotate_by_marker_scores(adata, available_markers, min_score=0.5)
+if (!is.null(go_up_all) && !is.null(go_down_all)) {
+  suppressWarnings({
+    up_top <- go_up_all@result[1:min(10, nrow(go_up_all)), ]
+    down_top <- go_down_all@result[1:min(10, nrow(go_down_all)), ]
+    up_top$Regulation <- "Up in DM"
+    down_top$Regulation <- "Down in DM"
+    combined <- rbind(up_top, down_top)
+    library(ggplot2)
+    combined$Description <- factor(combined$Description, 
+                                   levels = c(rev(up_top$Description), rev(down_top$Description)))
+    p_comb <- ggplot(combined, aes(x = Description, y = -log10(p.adjust), fill = Regulation)) +
+      geom_col(position = position_dodge(0.9), width = 0.7) +
+      coord_flip() +
+      labs(title = "GO Enrichment (DM vs Ctrl) - Top terms",
+           x = "", y = "-log10(adjusted p-value)") +
+      theme_bw() +
+      theme(axis.text.y = element_text(size = 10))
+    ggsave("figures/GO_overall_combined_barplot.png", p_comb, width = 12, height = 10, dpi = 300)
+  })
+}
 
-# 查看注释结果
-print("\n细胞类型注释统计:")
-celltype_counts = adata.obs['predicted_celltype'].value_counts()
-print(celltype_counts)
+# 保存全部GO结果到RDS
+saveRDS(go_results_by_celltype, "objects/GO_results_by_celltype.rds")
+cat("所有GO分析完成，结果已保存至 objects/GO_results_by_celltype.rds\n")
 
-# 将注释结果映射到聚类
-print("\n各聚类的细胞类型组成:")
-for cluster in sorted(adata.obs['cluster'].unique()):
-    cluster_mask = adata.obs['cluster'] == cluster
-    cluster_celltypes = adata.obs.loc[cluster_mask, 'predicted_celltype'].value_counts()
-    if len(cluster_celltypes) > 0:
-        main_type = cluster_celltypes.index[0]
-        main_percent = cluster_celltypes.iloc[0] / cluster_mask.sum() * 100
-        print(f"  聚类 {cluster}: 主要类型 = {main_type} ({main_percent:.1f}%)")
+# 8. 保存结果
+# ============================================================================
+cat("\n=== 8. 保存结果 ===\n")
 
-# 保存注释结果
-adata.write('adata_with_celltype_annotations.h5ad')
-print("✅ 保存带细胞类型注释的数据")
+# ==================== 8. 结果保存与报告生成 ====================
 
-# ======== 手动验证标记基因表达 ========
-print("\n" + "="*60)
-print("手动验证关键细胞类型的marker基因表达")
-print("="*60)
+# 确保输出目录存在
+dir.create("objects", showWarnings = FALSE, recursive = TRUE)
+dir.create("reports", showWarnings = FALSE, recursive = TRUE)
 
-# 选择要验证的关键细胞类型
-key_celltypes_to_check = ['Cardiomyocytes', 'Fibroblasts', 'Endothelial', 'Macrophages']
+# 8.1 保存完整的Seurat对象（压缩节省空间）
+saveRDS(merged_obj, "objects/DCM_integrated_seurat_object.rds", compress = TRUE)
+cat("Seurat对象已保存至 objects/DCM_integrated_seurat_object.rds\n")
 
-for celltype in key_celltypes_to_check:
-    if celltype in available_markers:
-        print(f"\n验证 {celltype} 的marker基因表达:")
-        markers = available_markers[celltype][:3]  # 取前3个基因
-        
-        # 筛选属于该细胞类型的细胞
-        celltype_mask = adata.obs['predicted_celltype'] == celltype
-        if celltype_mask.sum() > 0:
-            # 创建子图
-            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-            
-            for i, gene in enumerate(markers):
-                if gene in adata.var_names:
-                    # 在该细胞类型中的表达
-                    celltype_adata = adata[celltype_mask]
-                    expr_values = celltype_adata[:, gene].X
-                    if hasattr(expr_values, 'toarray'):
-                        expr_values = expr_values.toarray().flatten()
-                    
-                    # 绘制直方图
-                    axes[i].hist(expr_values, bins=30, alpha=0.7, color='skyblue')
-                    axes[i].set_xlabel('表达量')
-                    axes[i].set_ylabel('细胞数')
-                    axes[i].set_title(f'{gene} 在 {celltype} 中的表达')
-                    axes[i].grid(True, alpha=0.3)
-                    
-                    # 计算表达统计
-                    mean_expr = expr_values.mean()
-                    expr_percent = (expr_values > 0).mean() * 100
-                    axes[i].text(0.05, 0.95, f'平均: {mean_expr:.2f}\n表达率: {expr_percent:.1f}%', 
-                               transform=axes[i].transAxes, verticalalignment='top',
-                               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-            
-            plt.suptitle(f'{celltype} marker基因表达验证', fontsize=14, y=1.05)
-            plt.tight_layout()
-            plt.savefig(f'{celltype.lower()}_marker_validation.png', dpi=150, bbox_inches='tight')
-            plt.close()
-            print(f"✅ {celltype} marker验证图已保存")
-        else:
-            print(f"  ⚠️ 未找到预测为 {celltype} 的细胞")
-
-# 生成综合报告
-print("\n" + "="*60)
-print("细胞类型注释完成总结")
-print("="*60)
-
-print(f"\n1. 数据基本信息:")
-print(f"   总细胞数: {adata.n_obs}")
-print(f"   聚类数: {len(adata.obs['cluster'].unique())}")
-print(f"   预测的细胞类型数: {len(adata.obs['predicted_celltype'].unique())}")
-
-print(f"\n2. 细胞类型分布:")
-for celltype, count in adata.obs['predicted_celltype'].value_counts().items():
-    percent = count / adata.n_obs * 100
-    print(f"   {celltype}: {count} 细胞 ({percent:.1f}%)")
-
-print(f"\n3. 主要细胞类型的聚类对应关系:")
-# 找出每个聚类的主要细胞类型
-cluster_celltype_summary = {}
-for cluster in sorted(adata.obs['cluster'].unique()):
-    cluster_mask = adata.obs['cluster'] == cluster
-    cluster_types = adata.obs.loc[cluster_mask, 'predicted_celltype'].value_counts()
-    if len(cluster_types) > 0:
-        main_type = cluster_types.index[0]
-        main_count = cluster_types.iloc[0]
-        main_percent = main_count / cluster_mask.sum() * 100
-        cluster_celltype_summary[cluster] = (main_type, main_percent)
-        if main_percent > 50:  # 只显示纯度>50%的聚类
-            print(f"   聚类 {cluster}: {main_type} ({main_percent:.1f}%)")
-
-print(f"\n4. 下一步建议:")
-print("   a. 检查标记基因表达图，验证注释准确性")
-print("   b. 对混合度高的聚类进行人工复核")
-print("   c. 提取主要细胞类型进行子聚类分析")
-print("   d. 进行批次整合（如果批次效应明显）")
-
-# 保存最终结果
-adata.write('adata_final_annotated.h5ad')
-print("\n✅ 最终注释数据已保存: adata_final_annotated.h5ad")
-print("✅ 细胞类型注释步骤完成！")
-##############################################################################
-# 结果文件整理
-mkdir 01.qc_and_filter
-mv qc_comparison.png 01.qc_and_filter/
-mv qc_scatter.png 01.qc_and_filter/
-mv cell_metadata_before_qc.csv 01.qc_and_filter/
-mv cell_metadata_after_qc.csv 01.qc_and_filter/
-mv qc_by_sample.png 01.qc_and_filter/
-mv doublet_scores_0.png 01.qc_and_filter/
-mv doublet_scores_1.png 01.qc_and_filter/
-mv ctrl_qc_* 01.qc_and_filter/
-mv dm_qc_* 01.qc_and_filter/
-mv sample_cell_counts_comparison.png 01.qc_and_filter/
-qc_by_sample_before.png  qc_summary_report.txt
-mv qc_* 01.qc_and_filter/
-
-mkdir 02.doublet_cell_filter
-mv doublet_analysis.png 02.doublet_cell_filter/
-mv doublet_detection_report.txt 02.doublet_cell_filter/
-mv umap_doublet_sample.png 02.doublet_cell_filter/
-mv doublet_qc_correlation.png 02.doublet_cell_filter/
-
-mkdir 03.Normalization_and_HVGs
-mv highly_variable_genes_* 03.Normalization_and_HVGs/
-
-mkdir 04.PCA_tSNE_UMAP_and_cluster/
-mv cluster_marker_genes.csv 04.PCA_tSNE_UMAP_and_cluster/
-mv cell_clusters.csv 04.PCA_tSNE_UMAP_and_cluster/
-mv umap_coordinates.csv 04.PCA_tSNE_UMAP_and_cluster/
-mv integration_clustering_report.txt 04.PCA_tSNE_UMAP_and_cluster/
-mv sample_specific_analysis.png 04.PCA_tSNE_UMAP_and_cluster/
-mv marker_genes_dotplot.png 04.PCA_tSNE_UMAP_and_cluster/
-mv normalization_report.txt 04.PCA_tSNE_UMAP_and_cluster/
-mv pca_scree_plot.png 04.PCA_tSNE_UMAP_and_cluster/
-mv batch_* 04.PCA_tSNE_UMAP_and_cluster/
-mv  pca_* 04.PCA_tSNE_UMAP_and_cluster/
-mv tsne_clustering_distribution.png 04.PCA_tSNE_UMAP_and_cluster/
-mv preliminary_UMAP_check.png 04.PCA_tSNE_UMAP_and_cluster/
-
-mkdir 05.cell_type_annotation
-mv marker_gene_* 05.cell_type_annotation/
-mv celltype_* 05.cell_type_annotation/
-mv group_celltype_composition.png 05.cell_type_annotation/
-mv cardiomyocytes_marker_validation.png 05.cell_type_annotation/
-mv macrophages_marker_validation.png 05.cell_type_annotation/
+# 8.2 保存H5AD格式（用于Python分析）
+SeuratDisk::SaveH5Seurat(merged_obj, filename = "objects/DCM_integrated.h5seurat", overwrite = TRUE)
+SeuratDisk::Convert("objects/DCM_integrated.h5seurat", dest = "h5ad", overwrite = TRUE)
+cat("H5AD格式文件已保存至 objects/DCM_integrated.h5ad\n")
