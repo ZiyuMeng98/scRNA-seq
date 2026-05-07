@@ -5,3 +5,8 @@ for i in $(ls -d /home/mengziyu/working/scrna-seq/00.incipient_data/bulk/SRR*); 
 done > command.sra_to_fastq.list
 ParaFly -c command.sra_to_fastq.list -CPU 8
 
+FASTQ_DIR="/home/stu_wangyanan/working/scrna-seq/02.bulk_seq/00.raw_data"
+QC_DIR="/home/stu_wangyanan/working/scrna-seq/02.bulk_seq/01.qc"
+fastqc -o $QC_DIR -t 4 $FASTQ_DIR/*.fastq.gz
+cd /home/stu_wangyanan/working/scrna-seq/02.bulk_seq/01.qc
+multiqc .
