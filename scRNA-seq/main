@@ -118,6 +118,11 @@ library(rstatix)
 library(celldex)
 library(SingleR)
 library(glmGamPoi)
+library(clusterProfiler)
+library(org.Mm.eg.db)   # 小鼠注释包
+library(pheatmap)
+library(enrichplot)
+library(dplyr)
 
 # 设置并行计算
 options(future.seed = 1234L)
@@ -1060,12 +1065,6 @@ if (nrow(expr_matrix) > 0) {
 # 7. 通路富集分析
 # ============================================================================
 cat("\n=== 7. 通路富集分析 ===\n")
-
-# 加载包
-library(clusterProfiler)
-library(org.Mm.eg.db)   # 小鼠注释包
-library(enrichplot)
-library(dplyr)
 
 cat("进行通路富集分析...\n")
 go_results_by_celltype <- list()
