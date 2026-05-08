@@ -1,12 +1,137 @@
-# 加载完整的Seurat对象
-merged_obj <- readRDS("objects/DCM_integrated_seurat_object.rds")
-# 检查关键元数据列是否存在
-if(!"group" %in% colnames(merged_obj@meta.data)) {
-  stop("对象中缺少 'group' 列，请确保含有 Ctrl/DM 分组信息")
-}
-if(!"predicted_celltype" %in% colnames(merged_obj@meta.data)) {
-  stop("对象中缺少 'predicted_celltype' 列，请先完成细胞类型注释")
+# 在main后继续进行的子类分析
+# 设置默认 assay 为 RNA（差异分析推荐）
+DefaultAssay(merged_obj) <- "RNA"
+# 确保有降维结果（比如 umap_harmony）
+if(!"umap_harmony" %in% names(merged_obj@reductions)) {
+  stop("对象中没有 umap_harmony 降维，请先运行 RunUMAP(reduction = 'harmony')")
 }
 
-# 查看分组和细胞类型概览
-table(merged_obj$group, merged_obj$predicted_celltype)
+# ==================================================
+# 构建可解释的单细胞图谱
+# ==================================================
+# 主要细胞类型UMAP
+p_main <- DimPlot(merged_obj, reduction = "umap_harmony", 
+                  group.by = "predicted_celltype", label = TRUE, repel = TRUE) +
+  ggtitle("Major cell types in DCM") + theme_bw()
+ggsave("figures/UMAP_major_celltypes.png", p_main, width = 8, height = 6, dpi = 300)
+
+# 对关键细胞类型进行亚群细分（这里做的是糖尿病心肌病的主要响应细胞成纤维细胞）
+# 提取成纤维细胞
+fibro <- subset(merged_obj, predicted_celltype == "Fibroblast")
+
+# 重新PCA降维聚类
+fibro <- subset(merged_obj, predicted_celltype == "Fibroblast")
+DefaultAssay(fibro) <- "RNA"   # SCTransform 要求输入 assay 为 "RNA"
+fibro <- SCTransform(fibro, vst.flavor = "v2", verbose = FALSE) %>%
+         RunPCA(npcs = 30) %>%
+         RunUMAP(reduction = "pca", dims = 1:20) %>%
+         FindNeighbors(dims = 1:20) %>%
+         FindClusters(resolution = 0.5)
+
+# 绘制亚群 UMAP
+p_fibro <- DimPlot(fibro, label = TRUE) + ggtitle("Fibroblast subclusters")
+ggsave("figures/UMAP_fibroblast_subclusters.png", p_fibro, width = 7, height = 6, dpi = 300)
+
+# 寻找亚群标记基因，用于功能命名
+fibro_markers <- FindAllMarkers(fibro, only.pos = TRUE, logfc.threshold = 0.25)
+write.csv(fibro_markers, "tables/fibroblast_subcluster_markers.csv", row.names = FALSE)
+
+# ==================================================
+# 定位DCM关键承载细胞
+# ==================================================
+# 差异表达分析（按细胞类型，DM vs Ctrl）
+Idents(merged_obj) <- merged_obj$predicted_celltype
+unique_celltypes <- unique(merged_obj$predicted_celltype)
+de_results_by_celltype <- list()
+for (ct in unique_celltypes) {
+  cat("正在处理:", ct, "\n")
+  de <- FindMarkers(merged_obj,
+                    ident.1 = "DM",        # 实验组
+                    ident.2 = "Ctrl",      # 对照组
+                    group.by = "group",subset.ident = ct,logfc.threshold = 0,min.pct = 0.1)
+  de$gene <- rownames(de)
+  de_results_by_celltype[[ct]] <- de
+}
+saveRDS(de_results_by_celltype, "objects/de_results_by_celltype.rds")
+
+# 细胞比例变化图
+prop_df <- as.data.frame(prop.table(table(merged_obj$predicted_celltype, merged_obj$group), margin = 2))
+colnames(prop_df) <- c("CellType", "Group", "Proportion")
+p_prop <- ggplot(prop_df, aes(x = CellType, y = Proportion, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Cell type proportion changes (DM vs Ctrl)")
+ggsave("figures/celltype_proportion_change.png", p_prop, width = 10, height = 6, dpi = 300)
+
+# 各细胞类型差异基因数量比较（定位关键承载细胞）
+deg_counts <- data.frame(
+  CellType = names(de_results_by_celltype),
+  Up = sapply(de_results_by_celltype, function(x) sum(x$avg_log2FC > 0.5 & x$p_val_adj < 0.05, na.rm = TRUE)),
+  Down = sapply(de_results_by_celltype, function(x) sum(x$avg_log2FC < -0.5 & x$p_val_adj < 0.05, na.rm = TRUE))
+)
+
+p_deg <- deg_counts %>%
+  pivot_longer(-CellType, names_to = "Regulation", values_to = "Count") %>%
+  ggplot(aes(x = CellType, y = Count, fill = Regulation)) +
+  geom_col(position = "dodge") +
+  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Number of DE genes per cell type (|logFC|>0.5, adj.p<0.05)")
+ggsave("figures/DEG_counts_per_celltype.png", p_deg, width = 10, height = 6, dpi = 300)
+
+# 关键功能模块评分（纤维化、炎症、代谢应激）在细胞类型中的活性
+# 定义基因集（小鼠）
+fibrosis_genes <- c("Col1a1", "Col3a1", "Acta2", "Tgfb1", "Fn1", "Mmp2")
+inflam_genes <- c("Il1b", "Il6", "Tnf", "Ccl2", "Cxcl10", "Nfkb1")
+metab_genes <- c("Pdk4", "Ucp3", "Ppargc1a", "Slc2a4", "Cpt1b")
+
+# 计算模块得分
+merged_obj <- AddModuleScore(merged_obj, features = list(fibrosis_genes), name = "FibrosisScore")
+merged_obj <- AddModuleScore(merged_obj, features = list(inflam_genes), name = "InflamScore")
+merged_obj <- AddModuleScore(merged_obj, features = list(metab_genes), name = "MetabScore")
+
+# 小提琴图展示（分细胞类型和分组）
+VlnPlot(merged_obj, features = "FibrosisScore1", group.by = "group", split.by = "predicted_celltype") +
+  ggtitle("Fibrosis score") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("figures/Fibrosis_score_vln.png", width = 12, height = 8, dpi = 300)
+# ==================================================
+# 定义DCM核心分子程序（DCP）与下游应用
+# ==================================================
+# 提取跨细胞类型共同上调基因（出现在 ≥2/3 的细胞类型中）
+all_up_genes <- lapply(de_results_by_celltype, function(df) {
+  df %>% filter(p_val_adj < 0.05, avg_log2FC > 0.5) %>% pull(gene)
+})
+gene_occurrence <- table(unlist(all_up_genes))
+common_up <- names(gene_occurrence[gene_occurrence >= (2/3) * length(all_up_genes)])
+writeLines(common_up, "objects/DCP_common_up_genes.txt")
+cat("DCP核心上调基因数量:", length(common_up), "\n")
+
+# 验证 DCP 活性
+merged_obj <- AddModuleScore(merged_obj, features = list(common_up), name = "DCP_Score")
+VlnPlot(merged_obj, features = "DCP_Score1", group.by = "group", split.by = "predicted_celltype") +
+  ggtitle("DCP activity (common up-regulated genes)")
+ggsave("figures/DCP_activity_vln.png", width = 12, height = 8, dpi = 300)
+
+# GO 富集分析（DCP 上调基因）
+if (length(common_up) >= 5) {
+  library(org.Mm.eg.db)
+  up_entrez <- bitr(common_up, fromType = "SYMBOL", toType = "ENTREZID", 
+                    OrgDb = org.Mm.eg.db)$ENTREZID
+  go_dcp <- enrichGO(gene = up_entrez, OrgDb = org.Mm.eg.db, ont = "BP",
+                     pAdjustMethod = "BH", pvalueCutoff = 0.05, readable = TRUE)
+  if (!is.null(go_dcp) && nrow(go_dcp) > 0) {
+    p_go <- dotplot(go_dcp, showCategory = 15) + 
+            ggtitle("GO enrichment of DCP up-regulated genes")
+    ggsave("figures/DCP_GO_dotplot.png", p_go, width = 10, height = 8, dpi = 300)
+    write.csv(as.data.frame(go_dcp), "tables/DCP_GO_results.csv", row.names = FALSE)
+  }
+}
+
+# 药物重定位准备（将小鼠基因转为人类同源）
+library(biomaRt)
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+genes_human <- getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol",
+                      values = common_up, mart = mouse,
+                      attributesL = c("hgnc_symbol"), martL = human)
+write.table(unique(genes_human$HGNC.symbol), "objects/DCP_up_genes_human.txt",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
