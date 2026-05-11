@@ -1,0 +1,131 @@
+目标 1：将单细胞得到的“核心程序/关键轴”投影到 bulk 组织层面
+目的：用 bulk RNA-seq 验证单细胞发现的细胞状态/基因模块是否在组织水平存在一致的改变方向。
+
+准备：定义单细胞来源的基因集
+你需要从单细胞分析中提取几个基因列表（如：差异基因、WGCNA 模块、NMF 程序、AUCell 发现的 regulon 等）。如果没有加权，直接用基因名列表即可。
+示例（请替换为你真实的单细胞基因集，这里用小鼠 symbol）：
+
+r
+# 假设你的单细胞程序（人类或小鼠），这里要确保与 vsd 的行名一致（必须是同一种 ID）
+# 如果你的 vsd 行名是基因 symbol，直接用 symbol；如果是 ENSEMBL，就需要转换。
+# 我先假设你的 vsd 行名是基因 symbol。
+program_genes <- list(
+  "Fibrosis_program"    = c("Col1a1","Col3a1","Postn","Fn1","Tgfb1","Ctgf","Acta2"),
+  "Inflammation_program"= c("Il1b","Il6","Tnf","Ccl2","Nfkb1","Cxcl10"),
+  "Metabolic_program"   = c("Ppargc1a","Nrf1","Tfam","Acadm","Cpt1b","Mfn2")
+)
+用 GSVA 计算 ssGSEA 得分（适用于 bulk 标准化表达矩阵）
+r
+library(GSVA)
+
+# 如果你的 vsd 是基于 counts 做 vst 的，并且行名是基因 symbol
+expr_mat <- assay(vsd)   # 提取矩阵
+
+# 计算 ssGSEA 得分
+ssgsea <- gsva(expr_mat, program_genes, method = "ssgsea", kcdf = "Gaussian")
+# 若你用的是 log2(CPM) 或其他标准化矩阵，kcdf 也用 "Gaussian"
+
+# 转换为数据框并合并分组
+scores <- as.data.frame(t(ssgsea))
+scores$condition <- coldata$condition   # 假设 condition 列在 coldata 中
+
+# 查看得分
+head(scores)
+验证方向一致性：绘制 boxplot 并做统计检验
+r
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+scores_long <- pivot_longer(scores, -condition, names_to = "Program", values_to = "Score")
+
+ggplot(scores_long, aes(x = condition, y = Score, fill = condition)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  facet_wrap(~ Program, scales = "free_y") +
+  theme_bw() +
+  labs(title = "Bulk tissue validation of single-cell programs")
+
+# t 检验示例（可替换为 Wilcoxon）
+wt <- scores$condition == "WT"
+for(prog in names(program_genes)) {
+  cat("Program:", prog, "\n")
+  print(t.test(scores[wt, prog], scores[!wt, prog]))
+}
+如果 DCM 组纤维化程序得分显著升高（p < 0.05），且与单细胞中活化成纤维细胞得分方向一致，则验证通过。
+
+目标 2：构建可迁移的样本级评分（GSVA/ssGSEA），支撑“可泛化”的 biomarker
+目的：把上述程序固化成可跨平台、跨数据集使用的评分算法。
+
+2.1 固化基因集
+将程序基因列表用人类同源基因重新定义，以便未来用于独立队列（多为人类数据）。
+
+r
+library(biomaRt)
+
+# 将小鼠基因 symbol 映射到人
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+m2h <- getLDS(attributes = c("mgi_symbol"), mart = mouse,
+              attributesL = c("hgnc_symbol"), martL = human)
+
+# 为每个程序生成人类基因列表
+program_genes_human <- lapply(program_genes, function(gs) {
+  unique(m2h$HGNC.symbol[m2h$MGI.symbol %in% gs])
+})
+2.2 封装为评分函数（供他人使用）
+r
+calc_program_score <- function(expr, gene_set, method = "gaussian") {
+  # expr: 基因×样本的标准化矩阵（TPM、log2FPKM 等，不可为counts）
+  # gene_set: 基因名向量（需与expr行名一致）
+  gs_param <- list(gene_set)
+  names(gs_param) <- "program"
+  scores <- gsva(expr, gs_param, method = "ssgsea", kcdf = method, verbose = FALSE)
+  return(as.vector(scores))
+}
+这样，只要有人提供标准化表达矩阵和基因集（人类），就能复现你的程序得分。该评分可作为 biomarker 在其他队列中测试。
+
+目标 3：作为药物重定位（CMap/L1000）的 disease signature 输入来源
+目的：用 bulk DCM 的差异基因生成疾病签名，输入 CMap/LINCS L1000 数据库，寻找能逆转该签名的小分子药物。
+
+3.1 准备疾病签名（上调和下调基因，转为人类同源基因）
+r
+# 从你的差异结果中取显著基因
+res_sig <- subset(res, padj < 0.05 & abs(log2FoldChange) > 1)
+
+# 转换为基因符号（确保有对应的列）
+library(org.Mm.eg.db)
+res_sig$symbol <- mapIds(org.Mm.eg.db, 
+                         keys = rownames(res_sig), 
+                         column = "SYMBOL", 
+                         keytype = "ENSEMBL")
+
+# 拆分为 up/down
+up_mouse   <- na.omit(res_sig$symbol[res_sig$log2FoldChange > 1])
+down_mouse <- na.omit(res_sig$symbol[res_sig$log2FoldChange < -1])
+
+# 映射到人类
+up_human   <- unique(m2h$HGNC.symbol[m2h$MGI.symbol %in% up_mouse])
+down_human <- unique(m2h$HGNC.symbol[m2h$MGI.symbol %in% down_mouse])
+
+# 保存为两列表格（许多在线工具接受这种格式）
+write.table(data.frame(up = up_human), "disease_up_human.txt", 
+            row.names = F, quote = F, col.names = F)
+write.table(data.frame(down = down_human), "disease_down_human.txt", 
+            row.names = F, quote = F, col.names = F)
+3.2 查询药物数据库（两种方式）
+方法 A：使用 R 包 signatureSearch （Bioconductor，自动化）
+r
+# 安装（若没有）
+BiocManager::install("signatureSearch")
+
+library(signatureSearch)
+
+# 构建查询签名
+qSig <- qSig(query = list(up = up_human, down = down_human), 
+             gess_method = "LINCS", refdb = "lincs_expr")
+
+# 运行（需联网，可能较慢）
+drugs <- gess_Result(qSig)
+head(drugs)
