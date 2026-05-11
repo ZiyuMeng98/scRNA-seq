@@ -124,6 +124,87 @@ ego <- enrichGO(gene = sig_genes,
                 qvalueCutoff  = 0.05)
 head(ego)
 dotplot(ego)
-# ==========
+write.csv(ego@result, "GO_BP_enrichment.csv", row.names = FALSE)
 
+# KEGG 通路富集（强烈推荐）
+# KEGG 能解释差异基因在信号通路和代谢途径中的协同变化
+# 把 ENSEMBL 转为 ENTREZ ID（KEGG 需要）
+entrez_map <- AnnotationDbi::select(org.Mm.eg.db, keys = sig_genes, columns = "ENTREZID", keytype = "ENSEMBL")
+# 报告'select()' returned 1:many mapping between keys and columns时说明某些 ENSEMBL ID 对应了多个 ENTREZ ID，仅为提示
+# 去除没有 ENTREZ 的
+entrez_map <- entrez_map[!is.na(entrez_map$ENTREZID), ]
+# 去除一对多重复（保留第一个）
+entrez_map <- entrez_map[!duplicated(entrez_map$ENSEMBL), ]
+# 需要先下载好kegg_category.rda放到对应文件夹里
+ekegg <- enrichKEGG(gene = entrez_map$ENTREZID, organism = "mmu", pAdjustMethod = "BH", qvalueCutoff = 0.05)
+# 报错 URL 'https://yulab-smu.top/clusterProfiler/md5.txt': status was 'SSL connect error'无所谓
+ekegg <- enrichKEGG(gene = sig_df$ENTREZID, organism = "mmu", pAdjustMethod = "BH", qvalueCutoff  = 0.05)
+head(ekegg)
+dotplot(ekegg)
+
+# GSEA（基因集富集分析）
+# GSEA 不依赖人为划分的显著基因阈值，能抓住协同微弱但一致的功能改变
+# 准备排序的基因列表（按 log2FoldChange 降序）
+res_ordered <- res[order(res$log2FoldChange, decreasing = TRUE), ]
+geneList <- res_ordered$log2FoldChange
+names(geneList) <- rownames(res_ordered)
+
+# 转换 ID
+geneList_entrez <- bitr(names(geneList), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+# 注意去重并保持顺序
+geneList_entrez <- geneList_entrez[!duplicated(geneList_entrez$ENSEMBL), ]
+# 构建命名数值向量
+geneList_final <- geneList[geneList_entrez$ENSEMBL]
+names(geneList_final) <- geneList_entrez$ENTREZID
+# 去重 ENTREZ ID（每个 ENTREZ 只保留第一个值）
+geneList_final_unique <- geneList_final[!duplicated(names(geneList_final))]
+# 降序排列（GSEA 必需）
+geneList_final_unique <- sort(geneList_final_unique, decreasing = TRUE)
+# 确认没有重复
+any(duplicated(names(geneList_final_unique)))  # 应该返回 FALSE
+
+# GSEA GO
+gsea_go <- gseGO(geneList = geneList_final_unique, OrgDb = org.Mm.eg.db, ont = "BP", minGSSize = 10, maxGSSize = 500, pAdjustMethod = "BH", verbose = FALSE)
+dotplot(gsea_go)
+
+# GSEA KEGG
+gsea_kegg <- gseKEGG(geneList = geneList_final_unique, organism = "mmu", minGSSize = 10, maxGSSize = 500, pAdjustMethod = "BH",verbose = FALSE)
+dotplot(gsea_kegg)
+# GSEA 结果若出现 NES > 1.5 且 FDR < 0.05 的通路，通常有生物学意义
+# 查看结果表的前几列，重点关注 NES 和 p.adjust
+head(gsea_go@result[, c("Description", "NES", "pvalue", "p.adjust", "qvalue")])
+
+# 筛选出 |NES| > 1.5 且 FDR < 0.05 的显著通路
+sig_gsea <- gsea_go@result[abs(gsea_go@result$NES) > 1.5 & 
+                           gsea_go@result$p.adjust < 0.05, ]
+# 按 NES 绝对值排序
+sig_gsea <- sig_gsea[order(-abs(sig_gsea$NES)), ]
+head(sig_gsea[, c("Description", "NES", "p.adjust")])
+
+# 可视化（替换默认 dotplot）
+# 自定义气泡图（更美观）
+library(ggplot2)
+ego_df <- as.data.frame(ego)
+# 将 GeneRatio 从 "X/Y" 转为数值
+ego_df$GeneRatio_num <- sapply(ego_df$GeneRatio, function(x) eval(parse(text = x)))
+# 气泡图
+# 按校正后 p 值升序排序，取前 20 条
+ego_top <- ego_df[order(ego_df$p.adjust), ][1:20, ]   # 数字可按需调整
+
+ggplot(ego_top, aes(x = GeneRatio_num,
+                    y = reorder(Description, GeneRatio_num),
+                    size = Count,
+                    color = p.adjust)) +
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  labs(x = "GeneRatio", y = "", size = "Count", color = "p.adjust") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 9))  # 若标签仍多，可调小字号
+ggsave("GO_bubble_top20.pdf", width = 8, height = 6)
+
+# 富集网络图（看基因-通路联系）
+enrichplot::cnetplot(ego, showCategory = 5, foldChange = geneList_final_unique)
+ggsave("enrichplot.pdf", width = 8, height = 6)
+# ==========
+# 退出R，或进行其他分析
 # ==========
