@@ -10,3 +10,120 @@ QC_DIR="/home/stu_wangyanan/working/scrna-seq/02.bulk_seq/01.qc"
 fastqc -o $QC_DIR -t 4 $FASTQ_DIR/*.fastq.gz
 cd /home/stu_wangyanan/working/scrna-seq/02.bulk_seq/01.qc
 multiqc .
+
+# 构建STAR索引进行比对 
+# 确定读长参数 --sjdbOverhang，返回值减1为--sjdbOverhang参数值，这里返回了142，所以索引构建和后续比对使用141
+zcat 00.raw_data/SRR21943973_1.fastq.gz | head -4 | awk 'NR==2{print length($0)}'
+# 构建索引
+ STAR --runMode genomeGenerate \
+      --genomeDir /home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A/STAR \
+      --genomeFastaFiles /home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A/fasta/genome.fa \
+      --sjdbGTFfile /home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A/genes/genes.gtf \
+      --sjdbOverhang 141 \
+      --runThreadN 8
+# 比对
+while read sample; do
+    STAR --genomeDir /home/stu_wangyanan/working/scrna-seq/00.incipient_data/ref_genomic/refdata-gex-mm10-2020-A/STAR \
+         --readFilesIn 02.trimmed/${sample}_1.fastq.gz 02.trimmed/${sample}_2.fastq.gz \
+         --readFilesCommand zcat \
+         --outFileNamePrefix 03.align/${sample}_ \
+         --outSAMtype BAM SortedByCoordinate \
+         --quantMode GeneCounts \
+         --sjdbOverhang 141 \
+         --runThreadN 8; 
+done < samples.txt
+
+# 查看结果读数，检查比对质量
+# 小鼠 bulk RNA-seq 的正常范围：唯一比对率 85%～90% 左右，大幅度低于80%时需要检查接头是否去除干净，索引是否正确，以及--sjdbOverhang 是否设置正确
+# 只有个别样本异常，可能是该样本降解或污染
+grep "Uniquely mapped reads %" *Log.final.out
+
+# ==========
+# 获取基因表达矩阵（R）
+# ==========
+R
+align_dir <- getwd()
+# 列出所有 ReadsPerGene.out.tab 文件
+tab_files <- list.files(path = align_dir, pattern = "ReadsPerGene.out.tab$", full.names = TRUE)
+# 提取样本名
+sample_names <- gsub("_ReadsPerGene.out.tab$", "", basename(tab_files))
+cat("找到", length(tab_files), "个样本:", sample_names, "\n")
+# 读取第一个文件，固定基因顺序
+first <- read.table(tab_files[1], skip = 4,
+                    col.names = c("gene", "unstranded", "strand1", "strand2"))
+gene_ids <- first$gene
+# 初始化计数矩阵
+counts <- matrix(0, nrow = length(gene_ids), ncol = length(tab_files))
+colnames(counts) <- sample_names
+rownames(counts) <- gene_ids
+# 逐文件读取并安全填充
+for (i in seq_along(tab_files)) {
+    tmp <- read.table(tab_files[i], skip = 4,
+                      col.names = c("gene", "unstranded", "strand1", "strand2"))
+    # 确保基因顺序一致
+    if (!identical(tmp$gene, gene_ids)) {
+        idx <- match(gene_ids, tmp$gene)
+        if (anyNA(idx)) warning("文件 ", basename(tab_files[i]), " 缺少部分基因")
+        counts[, i] <- tmp$unstranded[idx]
+    } else {
+        counts[, i] <- tmp$unstranded
+    }
+}
+# 看一眼结果
+head(counts)
+dim(counts)
+# 保存到项目根目录
+write.csv(counts, file.path(align_dir, "counts_matrix.csv"))
+cat("计数矩阵已保存至:", file.path(align_dir, "counts_matrix.csv"), "\n")
+
+# 差异表达分析
+# 按照样本信息进行分组，其中3-5是DM，6-8是Ctrl
+coldata <- data.frame(
+    row.names = c("SRR21943973","SRR21943974","SRR21943975",
+                  "SRR21943976","SRR21943977","SRR21943978"),
+    condition = factor(c("DM","DM","DM","Ctrl","Ctrl","Ctrl"))
+)
+coldata # 查看分组情况
+# 读入计数矩阵 + 构建 DESeq2 对象
+library(DESeq2)
+# 读入之前保存的矩阵（行名是第一列基因 ID）
+counts <- as.matrix(read.csv("counts_matrix.csv", row.names = 1))
+# 确保矩阵的列名与 coldata 的行名顺序一致
+stopifnot(all(colnames(counts) == rownames(coldata)))
+# 构建 DESeqDataSet
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = coldata, design = ~ condition)
+# 过滤低表达基因（必须做）
+# 保留至少在一半样本中 count ≥ 10 的基因
+keep <- rowSums(counts(dds) >= 10) >= ncol(dds)/2
+dds <- dds[keep,]
+# 差异表达分析
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "Ctrl", "DM"))
+res <- res[order(res$padj), ]
+head(res)
+write.csv(as.data.frame(res), "DEG_results.csv")
+# 结果可视化（快速质检）
+# MA plot
+plotMA(res, ylim = c(-5, 5))
+# 样本聚类热图（用方差稳定转换后的数据）
+vsd <- vst(dds, blind = FALSE)
+plotPCA(vsd, intgroup = "condition")
+# 筛选显著差异基因 + 功能富集
+# 阈值：padj < 0.05 且 |log2FC| > 1
+sig <- subset(res, padj < 0.05 & abs(log2FoldChange) > 1)
+sig_genes <- rownames(sig)
+
+# GO/KEGG 富集分析
+library(clusterProfiler)
+library(org.Mm.eg.db)   # 小鼠数据库
+ego <- enrichGO(gene = sig_genes,
+                OrgDb = org.Mm.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff  = 0.05)
+head(ego)
+dotplot(ego)
+# ==========
+
+# ==========
