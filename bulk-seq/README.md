@@ -40,6 +40,3 @@
 - 如果单细胞程序使用的是人类基因，可略过小鼠→人映射步骤。
 - ssGSEA 的 `kcdf` 参数需根据输入矩阵的类型调整（log‑normalized 矩阵用 Gaussian，counts 用 Poisson）。
 - 在线查询 CMap/L1000 需要稳定网络，也可在脚本中使用 `signatureSearch` 包进行本地或半自动分析。
-
-## 维护者
-（填写你的名字/邮箱）
