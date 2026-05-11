@@ -1,7 +1,4 @@
-# 单细胞程序 → 组织验证 → 药物重定位分析脚本
-
-## 脚本名称
-`single_cell_program_bulk_validation_drug_repurposing_pipeline.R`
+# 单细胞程序 → 组织验证 → 药物重定位分析
 
 ## 功能概述
 本脚本将单细胞转录组学中发现的“核心细胞程序/关键分子轴”投射至 bulk RNA‑seq 数据中，完成三个层层递进的转化研究任务：
